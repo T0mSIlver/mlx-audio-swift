@@ -266,7 +266,11 @@ enum App {
             throw AppError.inputFileNotFound(inputURL.path)
         }
 
+        let loadStartTime = CFAbsoluteTimeGetCurrent()
         let model = try await loadModel(repo: options.model)
+        let modelLoadTime = CFAbsoluteTimeGetCurrent() - loadStartTime
+
+        let audioPrepStartTime = CFAbsoluteTimeGetCurrent()
         let (inputSampleRate, inputAudio) = try loadAudioArray(from: inputURL)
         let targetSampleRate: Int
         switch model {
@@ -280,6 +284,7 @@ enum App {
             inputSampleRate: inputSampleRate,
             targetSampleRate: targetSampleRate
         )
+        let audioPrepTime = CFAbsoluteTimeGetCurrent() - audioPrepStartTime
 
         let startTime = CFAbsoluteTimeGetCurrent()
 
@@ -358,7 +363,10 @@ enum App {
             let elapsed = CFAbsoluteTimeGetCurrent() - startTime
             print("\n==========")
             print("Saved file to: \(options.outputPath!).\(options.format.rawValue)")
-            print(String(format: "Processing time: %.2f seconds", elapsed))
+            print(String(format: "Model load time: %.2f seconds", modelLoadTime))
+            print(String(format: "Audio prep time: %.2f seconds", audioPrepTime))
+            print(String(format: "Model generation time: %.2f seconds", output.totalTime))
+            print(String(format: "End-to-end post-load time: %.2f seconds", elapsed))
             print(String(format: "Prompt: %d tokens, %.3f tokens-per-sec", output.promptTokens, output.promptTps))
             print(String(format: "Generation: %d tokens, %.3f tokens-per-sec", output.generationTokens, output.generationTps))
             print(String(format: "Peak memory: %.2f GB", output.peakMemoryUsage))
