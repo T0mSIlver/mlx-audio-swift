@@ -113,6 +113,17 @@ class STTViewModel {
         audioPlayer.loadAudio(from: url)
     }
 
+    func removeAudioFile() {
+        guard !isGenerating && !isRecording else { return }
+
+        audioPlayer.unloadAudio()
+        selectedAudioURL = nil
+        audioFileName = nil
+        currentTime = 0
+        duration = 0
+        isPlaying = false
+    }
+
     func startTranscription() {
         guard let audioURL = selectedAudioURL else {
             errorMessage = "No audio file selected"
@@ -334,6 +345,16 @@ class STTViewModel {
         NSPasteboard.general.clearContents()
         NSPasteboard.general.setString(transcriptionText, forType: .string)
         #endif
+    }
+
+    func clearTranscription() {
+        guard !isGenerating && !isRecording else { return }
+
+        transcriptionText = ""
+        errorMessage = nil
+        generationProgress = ""
+        tokensPerSecond = 0
+        peakMemory = 0
     }
 
     private func resampleAudio(_ audio: MLXArray, from sourceSR: Int, to targetSR: Int) throws -> MLXArray {

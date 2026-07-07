@@ -78,6 +78,15 @@ struct STTView: View {
                                 .foregroundStyle(.secondary)
                                 .lineLimit(1)
                             Spacer()
+                            Button(action: { viewModel.removeAudioFile() }) {
+                                Image(systemName: "xmark.circle.fill")
+                                    .font(.caption)
+                                    .foregroundStyle(.secondary)
+                            }
+                            .buttonStyle(.plain)
+                            .disabled(viewModel.isGenerating)
+                            .accessibilityLabel("Remove audio")
+                            .help("Remove audio")
                         }
                         .padding(.horizontal)
                     }
@@ -203,6 +212,20 @@ struct STTView: View {
                                 .clipShape(Capsule())
                         }
                         .buttonStyle(.plain)
+
+                        if !viewModel.isGenerating {
+                            Button(action: { viewModel.clearTranscription() }) {
+                                Image(systemName: "trash")
+                                    .font(buttonFont)
+                                    .foregroundStyle(.red)
+                                    .frame(width: buttonHeight, height: buttonHeight)
+                                    .background(Color.gray.opacity(0.2))
+                                    .clipShape(Capsule())
+                            }
+                            .buttonStyle(.plain)
+                            .accessibilityLabel("Clear transcription")
+                            .help("Clear transcription")
+                        }
                     }
 
                     // Stats after generation
