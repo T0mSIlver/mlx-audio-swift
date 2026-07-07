@@ -201,7 +201,7 @@ struct STTView: View {
                     }
                 }
                 .buttonStyle(.plain)
-                .disabled(!viewModel.isModelLoaded)
+                .disabled(!viewModel.canRecord)
 
                 if !viewModel.isRecording {
                     // Settings button

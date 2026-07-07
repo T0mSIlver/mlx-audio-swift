@@ -19,6 +19,9 @@ import AppKit
 @MainActor
 @Observable
 class STSViewModel {
+    private static let defaultModelId = "mlx-community/sam-audio-base"
+    private static let modelIdStorageKey = "VoicesApp.STSViewModel.modelId"
+
     var isLoading = false
     var isGenerating = false
     var generationProgress: String = ""
@@ -32,7 +35,11 @@ class STSViewModel {
     var useResidual: Bool = false
 
     // Model config
-    var modelId: String = "mlx-community/sam-audio-base"
+    var modelId: String = UserDefaults.standard.string(forKey: STSViewModel.modelIdStorageKey) ?? STSViewModel.defaultModelId {
+        didSet {
+            UserDefaults.standard.set(modelId, forKey: STSViewModel.modelIdStorageKey)
+        }
+    }
     private var loadedModelId: String?
 
     // Audio player state (manually synced from AudioPlayer via Combine)

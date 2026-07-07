@@ -13,6 +13,9 @@ import AppKit
 @MainActor
 @Observable
 class TTSViewModel {
+    private static let defaultModelId = "mlx-community/Qwen3-TTS-12Hz-0.6B-Base-8bit"
+    private static let modelIdStorageKey = "VoicesApp.TTSViewModel.modelId"
+
     var isLoading = false
     var isGenerating = false
     var generationProgress: String = ""
@@ -77,7 +80,11 @@ class TTSViewModel {
     var streamingPlayback: Bool = true // Play audio as chunks are generated
 
     // Model configuration
-    var modelId: String = "mlx-community/Qwen3-TTS-12Hz-0.6B-Base-8bit"
+    var modelId: String = UserDefaults.standard.string(forKey: TTSViewModel.modelIdStorageKey) ?? TTSViewModel.defaultModelId {
+        didSet {
+            UserDefaults.standard.set(modelId, forKey: TTSViewModel.modelIdStorageKey)
+        }
+    }
     private var loadedModelId: String?
 
     // Audio player state (manually synced from AudioPlayerManager)

@@ -9,6 +9,9 @@ import Combine
 @MainActor
 @Observable
 class STTViewModel {
+    private static let defaultModelId = "mlx-community/Qwen3-ASR-0.6B-4bit"
+    private static let modelIdStorageKey = "VoicesApp.STTViewModel.modelId"
+
     var isLoading = false
     var isGenerating = false
     var generationProgress: String = ""
@@ -27,7 +30,11 @@ class STTViewModel {
     var streamingDelayMs: Int = 480  // .agent default
 
     // Model configuration
-    var modelId: String = "mlx-community/Qwen3-ASR-0.6B-4bit"
+    var modelId: String = UserDefaults.standard.string(forKey: STTViewModel.modelIdStorageKey) ?? STTViewModel.defaultModelId {
+        didSet {
+            UserDefaults.standard.set(modelId, forKey: STTViewModel.modelIdStorageKey)
+        }
+    }
     private var loadedModelId: String?
 
     // Audio file
@@ -44,7 +51,8 @@ class STTViewModel {
     var recordingDuration: TimeInterval { recorder.recordingDuration }
     var audioLevel: Float { recorder.audioLevel }
 
-    private var model: Qwen3ASRModel?
+    private var model: (any STTGenerationModel)?
+    private var streamingModel: Qwen3ASRModel?
     private let audioPlayer = AudioPlayer()
     private let recorder = AudioRecorderManager()
     private var cancellables = Set<AnyCancellable>()
@@ -52,6 +60,10 @@ class STTViewModel {
 
     var isModelLoaded: Bool {
         model != nil
+    }
+
+    var canRecord: Bool {
+        streamingModel != nil
     }
 
     init() {
@@ -89,7 +101,9 @@ class STTViewModel {
         generationProgress = "Downloading model..."
 
         do {
-            model = try await Qwen3ASRModel.fromPretrained(modelId)
+            let loadedModel = try await loadSTTModel(modelId)
+            model = loadedModel
+            streamingModel = loadedModel as? Qwen3ASRModel
             loadedModelId = modelId
             generationProgress = ""
         } catch {
@@ -102,6 +116,7 @@ class STTViewModel {
 
     func reloadModel() async {
         model = nil
+        streamingModel = nil
         loadedModelId = nil
         Memory.clearCache()
         await loadModel()
@@ -149,27 +164,29 @@ class STTViewModel {
         peakMemory = 0
 
         do {
-            let (sampleRate, audioData) = try loadAudioArray(from: audioURL)
-            let targetRate = model.sampleRate
-
-            let resampled: MLXArray
-            if sampleRate != targetRate {
-                generationProgress = "Resampling \(sampleRate)Hz → \(targetRate)Hz..."
-                resampled = try resampleAudio(audioData, from: sampleRate, to: targetRate)
-            } else {
-                resampled = audioData
+            let (sampleRate, audioData) = try loadAudioArray(from: audioURL, sampleRate: 16_000)
+            if sampleRate != 16_000 {
+                generationProgress = "Resampling \(sampleRate)Hz → 16000Hz..."
             }
 
             generationProgress = "Transcribing..."
 
-            var tokenCount = 0
-            for try await event in model.generateStream(
-                audio: resampled,
+            let defaultParameters = model.defaultGenerationParameters
+            let parameters = STTGenerateParameters(
                 maxTokens: maxTokens,
                 temperature: temperature,
-                language: language,
-                chunkDuration: chunkDuration
-            ) {
+                topP: defaultParameters.topP,
+                topK: defaultParameters.topK,
+                verbose: false,
+                language: language.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? nil : language,
+                chunkDuration: chunkDuration,
+                minChunkDuration: defaultParameters.minChunkDuration,
+                repetitionPenalty: defaultParameters.repetitionPenalty,
+                repetitionContextSize: defaultParameters.repetitionContextSize
+            )
+
+            var tokenCount = 0
+            for try await event in model.generateStream(audio: audioData, generationParameters: parameters) {
                 try Task.checkCancellation()
 
                 switch event {
@@ -180,7 +197,12 @@ class STTViewModel {
                 case .info(let info):
                     tokensPerSecond = info.tokensPerSecond
                     peakMemory = info.peakMemoryUsage
-                case .result:
+                case .result(let output):
+                    if transcriptionText.isEmpty {
+                        transcriptionText = output.text
+                    }
+                    tokensPerSecond = output.generationTps
+                    peakMemory = output.peakMemoryUsage
                     generationProgress = ""
                 }
             }
@@ -205,7 +227,7 @@ class STTViewModel {
     private var lastReadPos: Int = 0
 
     func startRecording() async {
-        guard let model = model else {
+        guard let model = streamingModel else {
             errorMessage = "Model not loaded"
             return
         }
@@ -320,6 +342,43 @@ class STTViewModel {
             isGenerating = false
             generationProgress = ""
         }
+    }
+
+    private func loadSTTModel(_ repo: String) async throws -> any STTGenerationModel {
+        let lower = repo.lowercased()
+
+        if lower.contains("glmasr") || lower.contains("glm-asr") {
+            return try await GLMASRModel.fromPretrained(repo)
+        }
+        if lower.contains("qwen3-asr") || lower.contains("qwen3_asr") {
+            return try await Qwen3ASRModel.fromPretrained(repo)
+        }
+        if lower.contains("voxtral") {
+            return try await VoxtralRealtimeModel.fromPretrained(repo)
+        }
+        if lower.contains("cohere") {
+            return try await CohereTranscribeModel.fromPretrained(repo)
+        }
+        if lower.contains("parakeet") {
+            return try await ParakeetModel.fromPretrained(repo)
+        }
+        if lower.contains("firered") || lower.contains("fire-red") {
+            return try await FireRedASR2Model.fromPretrained(repo)
+        }
+        if lower.contains("sensevoice") {
+            return try await SenseVoiceModel.fromPretrained(repo)
+        }
+        if lower.contains("granite") {
+            return try await GraniteSpeechModel.fromPretrained(repo)
+        }
+
+        throw NSError(
+            domain: "STT",
+            code: 5,
+            userInfo: [
+                NSLocalizedDescriptionKey: "Unsupported STT model repo: \(repo)"
+            ]
+        )
     }
 
     func play() {

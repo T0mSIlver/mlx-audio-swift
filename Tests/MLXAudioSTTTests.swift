@@ -1347,6 +1347,43 @@ struct CohereTranscribeModuleSetupTests {
         #expect(config.quantization?.bits == 8)
     }
 
+    @Test func cohereConfigDecodingUsesHeadClassCountWhenVocabSizeMissing() throws {
+        let json = """
+        {
+          "model_type": "cohere_asr",
+          "sample_rate": 16000,
+          "max_audio_clip_s": 35,
+          "head": {
+            "num_classes": 16384
+          },
+          "encoder": {
+            "d_model": 1280,
+            "ff_expansion_factor": 4,
+            "n_heads": 8,
+            "conv_kernel_size": 9,
+            "n_layers": 48,
+            "pos_emb_max_len": 5000,
+            "subsampling_conv_channels": 256,
+            "subsampling_factor": 8,
+            "feat_in": 128
+          },
+          "transf_decoder": {
+            "config_dict": {
+              "hidden_size": 1024,
+              "inner_size": 4096,
+              "num_attention_heads": 8,
+              "num_layers": 8,
+              "max_sequence_length": 1024,
+              "vocab_size": "None"
+            }
+          }
+        }
+        """
+
+        let config = try JSONDecoder().decode(CohereTranscribeConfig.self, from: Data(json.utf8))
+        #expect(config.vocabSize == 16384)
+    }
+
     @Test func cohereAudioFeaturesShape() {
         let audio = MLXArray(Array(repeating: Float(0), count: 16_000))
         let filters = CohereTranscribeAudio.computeMelFilters()
