@@ -6,6 +6,7 @@ struct STTView: View {
     @State private var viewModel = STTViewModel()
     @State private var showFileImporter = false
     @State private var showSettings = false
+    @State private var isAudioHovering = false
 
     #if os(iOS)
     private let buttonHeight: CGFloat = 44
@@ -71,17 +72,19 @@ struct STTView: View {
                     if let fileName = viewModel.audioFileName {
                         HStack(spacing: 6) {
                             Image(systemName: "doc.fill")
-                                .font(.caption)
+                                .font(.footnote)
                                 .foregroundStyle(.secondary)
                             Text(fileName)
-                                .font(.caption)
+                                .font(.footnote)
                                 .foregroundStyle(.secondary)
                                 .lineLimit(1)
                             Spacer()
                             Button(action: { viewModel.removeAudioFile() }) {
                                 Image(systemName: "xmark.circle.fill")
-                                    .font(.caption)
-                                    .foregroundStyle(.secondary)
+                                    .font(.system(size: 18, weight: .semibold))
+                                    .foregroundStyle(isAudioHovering ? Color.red : Color.secondary)
+                                    .frame(width: 28, height: 28)
+                                    .contentShape(Circle())
                             }
                             .buttonStyle(.plain)
                             .disabled(viewModel.isGenerating)
@@ -89,6 +92,7 @@ struct STTView: View {
                             .help("Remove audio")
                         }
                         .padding(.horizontal)
+                        .padding(.top, 6)
                     }
 
                     // Audio player
@@ -101,6 +105,16 @@ struct STTView: View {
                     )
                     .padding(.horizontal)
                 }
+                .background(
+                    RoundedRectangle(cornerRadius: 8)
+                        .fill(isAudioHovering ? Color.gray.opacity(0.12) : Color.clear)
+                        .padding(.horizontal, 8)
+                )
+                .contentShape(Rectangle())
+                .onHover { hovering in
+                    isAudioHovering = hovering
+                }
+                .animation(.easeOut(duration: 0.12), value: isAudioHovering)
                 .padding(.bottom, 4)
             }
 
