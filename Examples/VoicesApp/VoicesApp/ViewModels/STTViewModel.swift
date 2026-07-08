@@ -104,7 +104,7 @@ class STTViewModel {
     }
 
     var supportsRealtimeRecording: Bool {
-        model is Qwen3ASRModel || model is CohereTranscribeModel
+        model is Qwen3ASRModel || model is CohereTranscribeModel || model is MossTranscribeDiarizeModel
     }
 
     var usesRealtimeRecording: Bool {
@@ -329,7 +329,7 @@ class STTViewModel {
             return
         }
         guard supportsRealtimeRecording else {
-            errorMessage = "Realtime recording is available for Qwen3-ASR and Cohere Transcribe models"
+            errorMessage = "Realtime recording is available for Qwen3-ASR, Cohere Transcribe, and MOSS Transcribe models"
             return
         }
 

@@ -679,6 +679,25 @@ private extension MossTranscribeDiarizeModel {
 }
 
 extension MossTranscribeDiarizeModel {
+    func streamingTranscribeWindow(
+        audio: MLXArray,
+        offsetSeconds: Double,
+        config: StreamingConfig
+    ) throws -> STTOutput {
+        let defaults = defaultGenerationParameters
+        let audioSeconds = Double(audio.dim(0)) / Double(sampleRate)
+        let estimatedWindowTokens = max(96, Int(ceil(audioSeconds * 32.0)))
+        return try generateSingleChunk(
+            audio: audio,
+            maxTokens: min(max(1, config.maxTokensPerPass), estimatedWindowTokens),
+            temperature: config.temperature,
+            repetitionPenalty: defaults.repetitionPenalty,
+            repetitionContextSize: defaults.repetitionContextSize,
+            prompt: nil,
+            offsetSeconds: offsetSeconds
+        )
+    }
+
     static func combineChunkOutputs(_ outputs: [STTOutput], totalTime: TimeInterval) -> STTOutput {
         let text = outputs
             .map(\.text)
