@@ -10,7 +10,17 @@ import Combine
 @Observable
 class STTViewModel {
     private static let defaultModelId = "mlx-community/Qwen3-ASR-0.6B-4bit"
+    private static let defaultMaxTokens = 1024
+    private static let defaultTemperature: Float = 0.0
+    private static let defaultLanguage = "English"
+    private static let defaultChunkDuration: Float = 30.0
+    private static let defaultStreamingDelayMs = 480
     private static let modelIdStorageKey = "VoicesApp.STTViewModel.modelId"
+    private static let maxTokensStorageKey = "VoicesApp.STTViewModel.maxTokens"
+    private static let temperatureStorageKey = "VoicesApp.STTViewModel.temperature"
+    private static let languageStorageKey = "VoicesApp.STTViewModel.language"
+    private static let chunkDurationStorageKey = "VoicesApp.STTViewModel.chunkDuration"
+    private static let streamingDelayMsStorageKey = "VoicesApp.STTViewModel.streamingDelayMs"
 
     var isLoading = false
     var isGenerating = false
@@ -21,13 +31,41 @@ class STTViewModel {
     var peakMemory: Double = 0
 
     // Generation parameters
-    var maxTokens: Int = 1024
-    var temperature: Float = 0.0
-    var language: String = "English"
-    var chunkDuration: Float = 30.0
+    var maxTokens: Int = UserDefaults.standard.object(forKey: STTViewModel.maxTokensStorageKey).map { _ in
+        UserDefaults.standard.integer(forKey: STTViewModel.maxTokensStorageKey)
+    } ?? STTViewModel.defaultMaxTokens {
+        didSet {
+            UserDefaults.standard.set(maxTokens, forKey: STTViewModel.maxTokensStorageKey)
+        }
+    }
+    var temperature: Float = UserDefaults.standard.object(forKey: STTViewModel.temperatureStorageKey).map { _ in
+        UserDefaults.standard.float(forKey: STTViewModel.temperatureStorageKey)
+    } ?? STTViewModel.defaultTemperature {
+        didSet {
+            UserDefaults.standard.set(temperature, forKey: STTViewModel.temperatureStorageKey)
+        }
+    }
+    var language: String = UserDefaults.standard.string(forKey: STTViewModel.languageStorageKey) ?? STTViewModel.defaultLanguage {
+        didSet {
+            UserDefaults.standard.set(language, forKey: STTViewModel.languageStorageKey)
+        }
+    }
+    var chunkDuration: Float = UserDefaults.standard.object(forKey: STTViewModel.chunkDurationStorageKey).map { _ in
+        UserDefaults.standard.float(forKey: STTViewModel.chunkDurationStorageKey)
+    } ?? STTViewModel.defaultChunkDuration {
+        didSet {
+            UserDefaults.standard.set(chunkDuration, forKey: STTViewModel.chunkDurationStorageKey)
+        }
+    }
 
     // Streaming parameters
-    var streamingDelayMs: Int = 480  // .agent default
+    var streamingDelayMs: Int = UserDefaults.standard.object(forKey: STTViewModel.streamingDelayMsStorageKey).map { _ in
+        UserDefaults.standard.integer(forKey: STTViewModel.streamingDelayMsStorageKey)
+    } ?? STTViewModel.defaultStreamingDelayMs {
+        didSet {
+            UserDefaults.standard.set(streamingDelayMs, forKey: STTViewModel.streamingDelayMsStorageKey)
+        }
+    } // .agent default
 
     // Model configuration
     var modelId: String = UserDefaults.standard.string(forKey: STTViewModel.modelIdStorageKey) ?? STTViewModel.defaultModelId {
@@ -125,6 +163,22 @@ class STTViewModel {
         loadedModelId = nil
         Memory.clearCache()
         await loadModel()
+    }
+
+    func resetSettingsToDefaults() {
+        modelId = STTViewModel.defaultModelId
+        maxTokens = STTViewModel.defaultMaxTokens
+        temperature = STTViewModel.defaultTemperature
+        language = STTViewModel.defaultLanguage
+        chunkDuration = STTViewModel.defaultChunkDuration
+        streamingDelayMs = STTViewModel.defaultStreamingDelayMs
+
+        UserDefaults.standard.removeObject(forKey: STTViewModel.modelIdStorageKey)
+        UserDefaults.standard.removeObject(forKey: STTViewModel.maxTokensStorageKey)
+        UserDefaults.standard.removeObject(forKey: STTViewModel.temperatureStorageKey)
+        UserDefaults.standard.removeObject(forKey: STTViewModel.languageStorageKey)
+        UserDefaults.standard.removeObject(forKey: STTViewModel.chunkDurationStorageKey)
+        UserDefaults.standard.removeObject(forKey: STTViewModel.streamingDelayMsStorageKey)
     }
 
     func selectAudioFile(_ url: URL) {

@@ -60,16 +60,23 @@ private struct StopSnapshot: Sendable {
 }
 
 private struct CohereStreamingSharedState: Sendable {
-    var samples: [Float] = []
+    var pendingSamples: [Float] = []
     var totalSamplesFed: Int = 0
     var lastDecodeTime: Date?
     var isDecoding: Bool = false
+    var finalizedWindowCount: Int = 0
+}
+
+private enum CohereDecodePassKind: Sendable {
+    case partial
+    case finalWindow
 }
 
 private struct CohereDecodePassParams: Sendable {
     let audio: UncheckedSendableBox<MLXArray>
     let model: UncheckedSendableBox<CohereTranscribeModel>
     let config: StreamingConfig
+    let kind: CohereDecodePassKind
     let confirmedTokenIds: [Int]
     let displayPrefix: String
     let prevProvisional: [Int]
@@ -77,6 +84,13 @@ private struct CohereDecodePassParams: Sendable {
     let prevAgreementCounts: [Int]
     let minAgreementPasses: Int
     let totalSamples: Int
+}
+
+private struct CohereDecodeLaunch: Sendable {
+    let samples: [Float]
+    let kind: CohereDecodePassKind
+    let totalSamples: Int
+    let encodedWindowCount: Int
 }
 
 private protocol StreamingInferenceSessionCore: AnyObject, Sendable {
@@ -134,6 +148,9 @@ public final class StreamingInferenceSession: @unchecked Sendable {
 private final class CohereStreamingInferenceSessionCore: @unchecked Sendable, StreamingInferenceSessionCore {
     private let model: CohereTranscribeModel
     private let config: StreamingConfig
+    private let sampleRate: Int
+    private let windowSamples: Int
+    private let overlapSamples: Int
     private let shared = OSAllocatedUnfairLock(initialState: SessionSharedState())
     private let audioState = OSAllocatedUnfairLock(initialState: CohereStreamingSharedState())
     private let sessionLock = OSAllocatedUnfairLock(initialState: 0)
@@ -148,6 +165,16 @@ private final class CohereStreamingInferenceSessionCore: @unchecked Sendable, St
     init(model: CohereTranscribeModel, config: StreamingConfig = StreamingConfig()) {
         self.model = model
         self.config = config
+        self.sampleRate = model.config.sampleRate
+        let windowSamples = model.config.sampleRate * 8
+        self.windowSamples = windowSamples
+        self.overlapSamples = max(
+            0,
+            min(
+                Int(round(config.encoderWindowOverlapSeconds * Double(model.config.sampleRate))),
+                max(0, windowSamples - 1)
+            )
+        )
 
         var continuation: AsyncStream<TranscriptionEvent>.Continuation!
         self.events = AsyncStream { continuation = $0 }
@@ -156,41 +183,57 @@ private final class CohereStreamingInferenceSessionCore: @unchecked Sendable, St
     }
 
     func feedAudio(samples: [Float]) {
-        let decodeSnapshot: ([Float], Int)? = sessionLock.withLock { _ in
+        let launch: CohereDecodeLaunch? = sessionLock.withLock { _ in
             guard isActive else { return nil }
 
             let now = Date()
             audioState.withLock { state in
-                state.samples.append(contentsOf: samples)
+                state.pendingSamples.append(contentsOf: samples)
                 state.totalSamplesFed += samples.count
             }
 
-            let shouldDecode = audioState.withLock { state -> Bool in
-                guard state.totalSamplesFed >= 8_000 else { return false }
-                guard !state.isDecoding else { return false }
+            return audioState.withLock { state -> CohereDecodeLaunch? in
+                guard !state.isDecoding else { return nil }
+
+                if state.pendingSamples.count >= windowSamples {
+                    let window = Array(state.pendingSamples.prefix(windowSamples))
+                    let keepStart = max(0, windowSamples - overlapSamples)
+                    state.pendingSamples = Array(state.pendingSamples[keepStart...])
+                    state.finalizedWindowCount += 1
+                    state.isDecoding = true
+                    state.lastDecodeTime = now
+                    return CohereDecodeLaunch(
+                        samples: window,
+                        kind: .finalWindow,
+                        totalSamples: state.totalSamplesFed,
+                        encodedWindowCount: state.finalizedWindowCount
+                    )
+                }
+
+                guard state.pendingSamples.count >= sampleRate / 2 else { return nil }
                 if let lastDecode = state.lastDecodeTime,
                    now.timeIntervalSince(lastDecode) < max(0.2, config.decodeIntervalSeconds)
                 {
-                    return false
+                    return nil
                 }
 
                 state.isDecoding = true
                 state.lastDecodeTime = now
-                return true
-            }
-
-            guard shouldDecode else { return nil }
-            return audioState.withLock { state in
-                (state.samples, state.totalSamplesFed)
+                return CohereDecodeLaunch(
+                    samples: state.pendingSamples,
+                    kind: .partial,
+                    totalSamples: state.totalSamplesFed,
+                    encodedWindowCount: state.finalizedWindowCount
+                )
             }
         }
 
-        if let decodeSnapshot {
-            launchDecodePassLocked(samples: decodeSnapshot.0, totalSamples: decodeSnapshot.1)
+        if let launch {
+            launchDecodePass(launch)
         }
     }
 
-    private func launchDecodePassLocked(samples: [Float], totalSamples: Int) {
+    private func launchDecodePass(_ launch: CohereDecodeLaunch) {
         let snapshot = shared.withLock { state -> ([Int], String, [Int], [Date], [Int]) in
             let prefix = QwenStreamingInferenceSessionCore.concatText(state.completedText, state.confirmedText)
             return (state.confirmedTokenIds,
@@ -201,20 +244,22 @@ private final class CohereStreamingInferenceSessionCore: @unchecked Sendable, St
         }
         let (confirmedTokenIds, displayPrefix, prevProvisional, prevFirstSeen, prevAgreementCounts) = snapshot
         let params = CohereDecodePassParams(
-            audio: UncheckedSendableBox(MLXArray(samples)),
+            audio: UncheckedSendableBox(MLXArray(launch.samples)),
             model: UncheckedSendableBox(model),
             config: config,
-            confirmedTokenIds: confirmedTokenIds,
-            displayPrefix: displayPrefix,
-            prevProvisional: prevProvisional,
-            prevFirstSeen: prevFirstSeen,
-            prevAgreementCounts: prevAgreementCounts,
-            minAgreementPasses: max(1, config.minAgreementPasses),
-            totalSamples: totalSamples
+            kind: launch.kind,
+            confirmedTokenIds: launch.kind == .partial ? confirmedTokenIds : [],
+            displayPrefix: launch.kind == .partial ? displayPrefix : "",
+            prevProvisional: launch.kind == .partial ? prevProvisional : [],
+            prevFirstSeen: launch.kind == .partial ? prevFirstSeen : [],
+            prevAgreementCounts: launch.kind == .partial ? prevAgreementCounts : [],
+            minAgreementPasses: launch.kind == .partial ? max(1, config.minAgreementPasses) : 1,
+            totalSamples: launch.totalSamples
         )
         let continuation = self.continuation
         let sharedState = self.shared
         let audioState = self.audioState
+        let encodedWindowCount = launch.encodedWindowCount
 
         decodeTask = Task.detached {
             defer {
@@ -225,7 +270,8 @@ private final class CohereStreamingInferenceSessionCore: @unchecked Sendable, St
             Self.runDecodePass(
                 params: params,
                 continuation: continuation,
-                sharedState: sharedState
+                sharedState: sharedState,
+                encodedWindowCount: encodedWindowCount
             )
         }
     }
@@ -233,33 +279,68 @@ private final class CohereStreamingInferenceSessionCore: @unchecked Sendable, St
     private static func runDecodePass(
         params: CohereDecodePassParams,
         continuation: AsyncStream<TranscriptionEvent>.Continuation?,
-        sharedState: OSAllocatedUnfairLock<SessionSharedState>
+        sharedState: OSAllocatedUnfairLock<SessionSharedState>,
+        encodedWindowCount: Int
     ) {
         if Task.isCancelled { return }
 
         let result = params.model.value.streamingDecodeTokenIds(
             audio: params.audio.value,
-            config: params.config
+            config: params.config,
+            confirmedTokenIds: params.confirmedTokenIds
         )
 
         if Task.isCancelled { return }
 
-        promoteTokens(
-            allTokenIds: result.tokenIds,
-            params: params,
-            continuation: continuation,
-            sharedState: sharedState
-        )
+        switch params.kind {
+        case .partial:
+            promoteTokens(
+                allTokenIds: result.tokenIds,
+                params: params,
+                continuation: continuation,
+                sharedState: sharedState
+            )
+        case .finalWindow:
+            finalizeWindow(
+                tokenIds: result.tokenIds,
+                model: params.model.value,
+                continuation: continuation,
+                sharedState: sharedState
+            )
+        }
 
-        let totalAudioSeconds = Double(params.totalSamples) / 16_000.0
+        let totalAudioSeconds = Double(params.totalSamples) / Double(params.model.value.config.sampleRate)
         let tokenCount = max(0, result.tokenIds.count - params.confirmedTokenIds.count)
         continuation?.yield(.stats(StreamingStats(
-            encodedWindowCount: max(1, Int(ceil(totalAudioSeconds / 8.0))),
+            encodedWindowCount: max(encodedWindowCount, Int(ceil(totalAudioSeconds / 8.0))),
             totalAudioSeconds: totalAudioSeconds,
             tokensPerSecond: result.decodeTime > 0 ? Double(tokenCount) / result.decodeTime : 0,
             realTimeFactor: result.totalTime / max(totalAudioSeconds, 0.001),
             peakMemoryGB: result.peakMemoryUsage
         )))
+    }
+
+    private static func finalizeWindow(
+        tokenIds: [Int],
+        model: CohereTranscribeModel,
+        continuation: AsyncStream<TranscriptionEvent>.Continuation?,
+        sharedState: OSAllocatedUnfairLock<SessionSharedState>
+    ) {
+        let windowText = model.streamingDecodeText(tokens: tokenIds)
+        let completedText = sharedState.withLock { state in
+            state.completedText = QwenStreamingInferenceSessionCore.concatText(state.completedText, windowText)
+            state.confirmedTokenIds = []
+            state.provisionalTokenIds = []
+            state.provisionalFirstSeen = []
+            state.provisionalAgreementCounts = []
+            state.confirmedText = ""
+            return state.completedText
+        }
+
+        continuation?.yield(.displayUpdate(
+            confirmedText: completedText,
+            provisionalText: ""
+        ))
     }
 
     private static func promoteTokens(
@@ -344,7 +425,13 @@ private final class CohereStreamingInferenceSessionCore: @unchecked Sendable, St
     }
 
     func stop() {
-        let stopContext: (previousStopTask: Task<Void, Never>?, inFlightDecode: Task<Void, Never>?, snapshot: ([Float], Int, String)?)? =
+        let stopContext: (
+            previousStopTask: Task<Void, Never>?,
+            inFlightDecode: Task<Void, Never>?,
+            pendingSamples: [Float],
+            totalSamples: Int,
+            encodedWindowCount: Int
+        )? =
             sessionLock.withLock { _ in
                 guard isActive else { return nil }
                 isActive = false
@@ -353,22 +440,33 @@ private final class CohereStreamingInferenceSessionCore: @unchecked Sendable, St
                 decodeTask = nil
 
                 let snapshot = audioState.withLock { state in
-                    let latestText = shared.withLock {
-                        QwenStreamingInferenceSessionCore.concatText($0.completedText, $0.confirmedText)
-                    }
-                    return (state.samples, state.totalSamplesFed, latestText)
+                    (
+                        state.pendingSamples,
+                        state.totalSamplesFed,
+                        state.finalizedWindowCount
+                    )
                 }
 
                 let previousStopTask = stopTask
                 stopTask = nil
-                return (previousStopTask, inFlightDecode, snapshot)
+                return (previousStopTask, inFlightDecode, snapshot.0, snapshot.1, snapshot.2)
             }
 
         guard let stopContext else { return }
         stopContext.previousStopTask?.cancel()
 
-        let task = Task.detached { [self, inFlightDecode = stopContext.inFlightDecode, snapshot = stopContext.snapshot] in
-            await finishStop(waitingFor: inFlightDecode, snapshot: snapshot)
+        let task = Task.detached {
+            [self,
+             inFlightDecode = stopContext.inFlightDecode,
+             pendingSamples = stopContext.pendingSamples,
+             totalSamples = stopContext.totalSamples,
+             encodedWindowCount = stopContext.encodedWindowCount] in
+            await finishStop(
+                waitingFor: inFlightDecode,
+                pendingSamples: pendingSamples,
+                totalSamples: totalSamples,
+                encodedWindowCount: encodedWindowCount
+            )
         }
 
         sessionLock.withLock { _ in
@@ -380,7 +478,9 @@ private final class CohereStreamingInferenceSessionCore: @unchecked Sendable, St
 
     private func finishStop(
         waitingFor inFlightDecode: Task<Void, Never>?,
-        snapshot: ([Float], Int, String)?
+        pendingSamples: [Float],
+        totalSamples: Int,
+        encodedWindowCount: Int
     ) async {
         if let inFlightDecode {
             _ = await inFlightDecode.value
@@ -390,23 +490,25 @@ private final class CohereStreamingInferenceSessionCore: @unchecked Sendable, St
             return
         }
 
-        if let snapshot, !snapshot.0.isEmpty {
+        if !pendingSamples.isEmpty {
             let params = CohereDecodePassParams(
-                audio: UncheckedSendableBox(MLXArray(snapshot.0)),
+                audio: UncheckedSendableBox(MLXArray(pendingSamples)),
                 model: UncheckedSendableBox(model),
                 config: config,
+                kind: .finalWindow,
                 confirmedTokenIds: [],
                 displayPrefix: "",
                 prevProvisional: [],
                 prevFirstSeen: [],
                 prevAgreementCounts: [],
                 minAgreementPasses: 1,
-                totalSamples: snapshot.1
+                totalSamples: totalSamples
             )
             Self.runDecodePass(
                 params: params,
                 continuation: continuation,
-                sharedState: shared
+                sharedState: shared,
+                encodedWindowCount: encodedWindowCount + 1
             )
         }
 
@@ -432,7 +534,7 @@ private final class CohereStreamingInferenceSessionCore: @unchecked Sendable, St
             continuation = nil
             stopTask = nil
             audioState.withLock { state in
-                state.samples = []
+                state.pendingSamples = []
                 state.isDecoding = false
             }
         }
@@ -450,7 +552,7 @@ private final class CohereStreamingInferenceSessionCore: @unchecked Sendable, St
             continuation?.finish()
             continuation = nil
             audioState.withLock { state in
-                state.samples = []
+                state.pendingSamples = []
                 state.isDecoding = false
             }
         }

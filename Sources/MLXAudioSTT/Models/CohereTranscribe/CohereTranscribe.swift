@@ -721,7 +721,11 @@ private extension CohereTranscribeModel {
 }
 
 extension CohereTranscribeModel {
-    func streamingDecodeTokenIds(audio: MLXArray, config: StreamingConfig) -> CohereStreamingDecodeResult {
+    func streamingDecodeTokenIds(
+        audio: MLXArray,
+        config: StreamingConfig,
+        confirmedTokenIds: [Int] = []
+    ) -> CohereStreamingDecodeResult {
         let language = config.language.trimmingCharacters(in: .whitespacesAndNewlines)
         let defaultParameters = defaultGenerationParameters
         let parameters = STTGenerateParameters(
@@ -749,7 +753,44 @@ extension CohereTranscribeModel {
             requestedMaxTokens: parameters.maxTokens
         )
 
-        for pos in context.promptLength..<(context.promptLength + maxGenerationTokens) {
+        for (offset, token) in confirmedTokenIds.prefix(maxGenerationTokens).enumerated() {
+            if Task.isCancelled { break }
+
+            generated.append(token)
+
+            let inputIds = MLXArray([Int32(token)]).expandedDimensions(axis: 0)
+            let positions = MLXArray([Int32(context.promptLength + offset)]).expandedDimensions(axis: 0)
+
+            let next = decoder(
+                inputIds: inputIds,
+                positions: positions,
+                encoderHiddenStates: context.adapterOut,
+                selfAttentionMask: nil,
+                crossAttentionMask: nil,
+                cache: context.cache
+            )
+
+            context.cache = next.1
+            context.logits = lmHead(next.0[0, -1])
+            eval(context.logits)
+        }
+
+        let generationStart = context.promptLength + generated.count
+        let generationEnd = context.promptLength + maxGenerationTokens
+        guard generationStart < generationEnd else {
+            let end = Date()
+            let peakMemoryUsage = Double(Memory.peakMemory) / 1e9
+            Memory.clearCache()
+            return CohereStreamingDecodeResult(
+                tokenIds: generated,
+                promptLength: context.promptLength,
+                decodeTime: end.timeIntervalSince(decodeStart),
+                totalTime: end.timeIntervalSince(context.startTime),
+                peakMemoryUsage: peakMemoryUsage
+            )
+        }
+
+        for pos in generationStart..<generationEnd {
             if Task.isCancelled { break }
 
             let token = sample(logits: context.logits, temperature: parameters.temperature)

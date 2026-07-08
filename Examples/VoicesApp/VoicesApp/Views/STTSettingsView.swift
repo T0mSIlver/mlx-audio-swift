@@ -259,12 +259,7 @@ struct STTSettingsView: View {
 
             // Reset button
             Button(action: {
-                viewModel.modelId = "mlx-community/Qwen3-ASR-0.6B-4bit"
-                viewModel.maxTokens = 1024
-                viewModel.temperature = 0.0
-                viewModel.language = "English"
-                viewModel.chunkDuration = 30.0
-                viewModel.streamingDelayMs = 480
+                viewModel.resetSettingsToDefaults()
             }) {
                 Text("Reset to Defaults")
                     .font(textFont)

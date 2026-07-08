@@ -20,7 +20,11 @@ import AppKit
 @Observable
 class STSViewModel {
     private static let defaultModelId = "mlx-community/sam-audio-base"
+    private static let defaultSeparationDescription = "speech"
+    private static let defaultUseResidual = false
     private static let modelIdStorageKey = "VoicesApp.STSViewModel.modelId"
+    private static let separationDescriptionStorageKey = "VoicesApp.STSViewModel.separationDescription"
+    private static let useResidualStorageKey = "VoicesApp.STSViewModel.useResidual"
 
     var isLoading = false
     var isGenerating = false
@@ -29,10 +33,20 @@ class STSViewModel {
     var audioURL: URL?
 
     // What to isolate. "speech", "music", "drums", etc.
-    var separationDescription: String = "speech"
+    var separationDescription: String = UserDefaults.standard.string(forKey: STSViewModel.separationDescriptionStorageKey) ?? STSViewModel.defaultSeparationDescription {
+        didSet {
+            UserDefaults.standard.set(separationDescription, forKey: STSViewModel.separationDescriptionStorageKey)
+        }
+    }
 
     // Whether to play the residual (everything *except* the target) instead
-    var useResidual: Bool = false
+    var useResidual: Bool = UserDefaults.standard.object(forKey: STSViewModel.useResidualStorageKey).map { _ in
+        UserDefaults.standard.bool(forKey: STSViewModel.useResidualStorageKey)
+    } ?? STSViewModel.defaultUseResidual {
+        didSet {
+            UserDefaults.standard.set(useResidual, forKey: STSViewModel.useResidualStorageKey)
+        }
+    }
 
     // Model config
     var modelId: String = UserDefaults.standard.string(forKey: STSViewModel.modelIdStorageKey) ?? STSViewModel.defaultModelId {
@@ -103,6 +117,16 @@ class STSViewModel {
         loadedModelId = nil
         Memory.clearCache()
         await loadModel()
+    }
+
+    func resetSettingsToDefaults() {
+        modelId = STSViewModel.defaultModelId
+        separationDescription = STSViewModel.defaultSeparationDescription
+        useResidual = STSViewModel.defaultUseResidual
+
+        UserDefaults.standard.removeObject(forKey: STSViewModel.modelIdStorageKey)
+        UserDefaults.standard.removeObject(forKey: STSViewModel.separationDescriptionStorageKey)
+        UserDefaults.standard.removeObject(forKey: STSViewModel.useResidualStorageKey)
     }
 
     // MARK: - Separation
