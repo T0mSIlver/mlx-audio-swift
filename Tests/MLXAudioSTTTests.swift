@@ -14,9 +14,12 @@
 //      -only-testing:MLXAudioTests/SenseVoiceTests \
 //      -only-testing:MLXAudioTests/SenseVoiceNetworkTests \
 //      -only-testing:MLXAudioTests/ParakeetSTTTests \
+//      -only-testing:MLXAudioTests/NemotronASRTests \
 //      -only-testing:MLXAudioTests/VoxtralRealtimeSTTTests \
 //      -only-testing:MLXAudioTests/CohereTranscribeModuleSetupTests \
 //      -only-testing:MLXAudioTests/CohereTranscribeSTTTests \
+//      -only-testing:MLXAudioTests/WhisperTests \
+//      -only-testing:MLXAudioTests/WhisperNetworkTests \
 //      CODE_SIGNING_ALLOWED=NO
 //
 //  Run a single category:
@@ -31,9 +34,12 @@
 //    -only-testing:'MLXAudioTests/SenseVoiceTests'
 //    -only-testing:'MLXAudioTests/SenseVoiceNetworkTests'
 //    -only-testing:'MLXAudioTests/ParakeetSTTTests'
+//    -only-testing:'MLXAudioTests/NemotronASRTests'
 //    -only-testing:'MLXAudioTests/VoxtralRealtimeSTTTests'
 //    -only-testing:'MLXAudioTests/CohereTranscribeModuleSetupTests'
 //    -only-testing:'MLXAudioTests/CohereTranscribeSTTTests'
+//    -only-testing:'MLXAudioTests/WhisperTests'
+//    -only-testing:'MLXAudioTests/WhisperNetworkTests'
 //
 //  Run a single test (note the trailing parentheses for Swift Testing):
 //    -only-testing:'MLXAudioTests/GLMASRModuleSetupTests/whisperConfigDefaults()'
@@ -159,7 +165,7 @@ struct GLMASRModuleSetupTests {
     // MARK: - Configuration Tests
 
     @Test func whisperConfigDefaults() {
-        let config = WhisperConfig()
+        let config = GLMASRWhisperConfig()
 
         #expect(config.modelType == "whisper")
         #expect(config.activationFunction == "gelu")
@@ -173,7 +179,7 @@ struct GLMASRModuleSetupTests {
     }
 
     @Test func whisperConfigCustom() {
-        let config = WhisperConfig(
+        let config = GLMASRWhisperConfig(
             dModel: 512,
             encoderAttentionHeads: 8,
             encoderLayers: 6,
@@ -223,7 +229,7 @@ struct GLMASRModuleSetupTests {
     }
 
     @Test func glmASRModelConfigWithNestedConfigs() {
-        let whisperConfig = WhisperConfig(dModel: 512, encoderLayers: 6)
+        let whisperConfig = GLMASRWhisperConfig(dModel: 512, encoderLayers: 6)
         let llamaConfig = LlamaConfig(hiddenSize: 1024, numHiddenLayers: 12)
 
         let config = GLMASRModelConfig(
@@ -242,13 +248,13 @@ struct GLMASRModuleSetupTests {
     // MARK: - Layer Tests
 
     @Test func whisperAttentionShape() {
-        let config = WhisperConfig(
+        let config = GLMASRWhisperConfig(
             dModel: 256,
             encoderAttentionHeads: 4,
             encoderLayers: 2
         )
 
-        let attention = WhisperAttention(config: config, useRope: false)
+        let attention = GLMASRWhisperAttention(config: config, useRope: false)
 
         let batchSize = 2
         let seqLen = 10
@@ -260,14 +266,14 @@ struct GLMASRModuleSetupTests {
     }
 
     @Test func whisperAttentionWithRoPE() {
-        let config = WhisperConfig(
+        let config = GLMASRWhisperConfig(
             dModel: 256,
             encoderAttentionHeads: 4,
             encoderLayers: 2,
             ropeTraditional: true
         )
 
-        let attention = WhisperAttention(config: config, useRope: true)
+        let attention = GLMASRWhisperAttention(config: config, useRope: true)
 
         let batchSize = 2
         let seqLen = 10
@@ -279,14 +285,14 @@ struct GLMASRModuleSetupTests {
     }
 
     @Test func whisperEncoderLayerShape() {
-        let config = WhisperConfig(
+        let config = GLMASRWhisperConfig(
             dModel: 256,
             encoderAttentionHeads: 4,
             encoderFfnDim: 1024,
             encoderLayers: 1
         )
 
-        let layer = WhisperEncoderLayer(config: config, useRope: false)
+        let layer = GLMASRWhisperEncoderLayer(config: config, useRope: false)
 
         let batchSize = 2
         let seqLen = 10
@@ -298,7 +304,7 @@ struct GLMASRModuleSetupTests {
     }
 
     @Test func whisperEncoderShape() {
-        let config = WhisperConfig(
+        let config = GLMASRWhisperConfig(
             dModel: 256,
             encoderAttentionHeads: 4,
             encoderFfnDim: 1024,
@@ -307,7 +313,7 @@ struct GLMASRModuleSetupTests {
             maxSourcePositions: 100
         )
 
-        let encoder = WhisperEncoder(config: config, useRope: false)
+        let encoder = GLMASRWhisperEncoder(config: config, useRope: false)
 
         let batchSize = 2
         let seqLen = 100
@@ -339,7 +345,7 @@ struct GLMASRModuleSetupTests {
     }
 
     @Test func audioEncoderShape() {
-        let whisperConfig = WhisperConfig(
+        let whisperConfig = GLMASRWhisperConfig(
             dModel: 256,
             encoderAttentionHeads: 4,
             encoderFfnDim: 1024,
@@ -374,7 +380,7 @@ struct GLMASRModuleSetupTests {
     }
 
     @Test func audioEncoderBoaEoaTokens() {
-        let whisperConfig = WhisperConfig(dModel: 256, encoderAttentionHeads: 4, encoderLayers: 1)
+        let whisperConfig = GLMASRWhisperConfig(dModel: 256, encoderAttentionHeads: 4, encoderLayers: 1)
         let llamaConfig = LlamaConfig(hiddenSize: 512)
         let config = GLMASRModelConfig(whisperConfig: whisperConfig, lmConfig: llamaConfig)
 
@@ -452,7 +458,7 @@ struct GLMASRModuleSetupTests {
         """
 
         let data = json.data(using: .utf8)!
-        let config = try JSONDecoder().decode(WhisperConfig.self, from: data)
+        let config = try JSONDecoder().decode(GLMASRWhisperConfig.self, from: data)
 
         #expect(config.modelType == "whisper")
         #expect(config.dModel == 512)
@@ -559,6 +565,552 @@ struct GLMASRModuleSetupTests {
 
         let array = container.value.value as? [Any]
         #expect(array?.count == 3)
+    }
+}
+
+struct Wav2Vec2CTCSTTTests {
+    @Test func configDecodesMMSFieldsAndDefaults() throws {
+        let json = """
+        {
+          "model_type": "wav2vec2",
+          "vocab_size": 42,
+          "hidden_size": 16,
+          "num_hidden_layers": 2,
+          "num_attention_heads": 4,
+          "intermediate_size": 32,
+          "feat_extract_norm": "layer",
+          "conv_dim": [8, 8],
+          "conv_stride": [2, 2],
+          "conv_kernel": [4, 3],
+          "conv_bias": true,
+          "num_conv_pos_embeddings": 6,
+          "num_conv_pos_embedding_groups": 2,
+          "do_stable_layer_norm": true,
+          "adapter_attn_dim": 4
+        }
+        """
+
+        let config = try JSONDecoder().decode(Wav2Vec2STTConfig.self, from: Data(json.utf8))
+
+        #expect(config.vocabSize == 42)
+        #expect(config.hiddenSize == 16)
+        #expect(config.featExtractNorm == "layer")
+        #expect(config.convBias)
+        #expect(config.numFeatExtractLayers == 2)
+        #expect(config.doStableLayerNorm)
+        #expect(config.adapterAttnDim == 4)
+        #expect(config.padTokenId == 0)
+    }
+
+    @Test func sanitizerMapsCTCAndWeightNormKeys() {
+        let weights: [String: MLXArray] = [
+            "wav2vec2.feature_extractor.conv_layers.0.conv.weight": MLXArray.ones([4, 1, 3]),
+            "wav2vec2.encoder.pos_conv_embed.conv.parametrizations.weight.original0": MLXArray.ones([1, 1, 4]),
+            "wav2vec2.encoder.pos_conv_embed.conv.parametrizations.weight.original1": MLXArray.ones([8, 2, 4]),
+            "lm_head.weight": MLXArray.ones([5, 8]),
+            "quantizer.weight": MLXArray.ones([2, 2]),
+            "wav2vec2.quantizer.weight": MLXArray.ones([2, 2]),
+            "wav2vec2.project_hid.weight": MLXArray.ones([2, 2]),
+            "wav2vec2.masked_spec_embed": MLXArray.ones([8]),
+        ]
+
+        let sanitized = Wav2Vec2CTCModel.sanitize(weights: weights)
+
+        #expect(sanitized["wav2vec2.feature_extractor.conv_layers.0.conv.weight"]?.shape == [4, 3, 1])
+        #expect(sanitized["wav2vec2.encoder.pos_conv_embed.conv.weight"]?.shape == [8, 4, 2])
+        #expect(sanitized["lm_head.weight"]?.shape == [5, 8])
+        #expect(sanitized["quantizer.weight"] == nil)
+        #expect(sanitized["wav2vec2.quantizer.weight"] == nil)
+        #expect(sanitized["wav2vec2.project_hid.weight"] == nil)
+        #expect(sanitized["wav2vec2.masked_spec_embed"] == nil)
+    }
+
+    @Test func layerNormFeatureExtractorWeightsUpdate() throws {
+        let config = Wav2Vec2STTConfig(
+            vocabSize: 6,
+            hiddenSize: 8,
+            numHiddenLayers: 0,
+            numAttentionHeads: 2,
+            intermediateSize: 16,
+            hiddenDropout: 0,
+            activationDropout: 0,
+            featProjDropout: 0,
+            featExtractNorm: "layer",
+            convDim: [4],
+            convStride: [2],
+            convKernel: [4],
+            convBias: true,
+            numConvPosEmbeddings: 4,
+            numConvPosEmbeddingGroups: 2
+        )
+        let model = Wav2Vec2CTCModel(config: config)
+
+        try model.update(
+            parameters: ModuleParameters.unflattened([
+                "wav2vec2.feature_extractor.conv_layers.0.layer_norm.weight": MLXArray.ones([4]),
+                "wav2vec2.feature_extractor.conv_layers.0.layer_norm.bias": MLXArray.zeros([4]),
+            ]),
+            verify: .noUnusedKeys
+        )
+    }
+
+    @Test func encoderLayerParameterPathsMatchCheckpointKeys() {
+        let regular = Wav2Vec2CTCModel(config: Wav2Vec2STTConfig(
+            hiddenSize: 8,
+            numHiddenLayers: 1,
+            numAttentionHeads: 2,
+            intermediateSize: 16,
+            hiddenDropout: 0,
+            activationDropout: 0,
+            featProjDropout: 0,
+            convDim: [4],
+            convStride: [2],
+            convKernel: [4],
+            numConvPosEmbeddings: 4,
+            numConvPosEmbeddingGroups: 2
+        ))
+        let regularKeys = Set(regular.parameters().flattened().map(\.0))
+        #expect(regularKeys.contains("wav2vec2.encoder.layers.0.attention.k_proj.weight"))
+        #expect(regularKeys.contains("wav2vec2.encoder.layers.0.feed_forward.output_dense.weight"))
+
+        let stable = Wav2Vec2CTCModel(config: Wav2Vec2STTConfig(
+            hiddenSize: 8,
+            numHiddenLayers: 1,
+            numAttentionHeads: 2,
+            intermediateSize: 16,
+            hiddenDropout: 0,
+            activationDropout: 0,
+            featProjDropout: 0,
+            convDim: [4],
+            convStride: [2],
+            convKernel: [4],
+            numConvPosEmbeddings: 4,
+            numConvPosEmbeddingGroups: 2,
+            doStableLayerNorm: true,
+            adapterAttnDim: 4
+        ))
+        let stableKeys = Set(stable.parameters().flattened().map(\.0))
+        #expect(stableKeys.contains("wav2vec2.encoder.layers.0.attention.k_proj.weight"))
+        #expect(stableKeys.contains("wav2vec2.encoder.layers.0.adapter_layer.linear_1.weight"))
+    }
+
+    @Test func wav2vecBackboneSanitizerDropsLMHead() {
+        let weights: [String: MLXArray] = [
+            "wav2vec2.feature_projection.layer_norm.weight": MLXArray.ones([8]),
+            "lm_head.weight": MLXArray.ones([5, 8]),
+        ]
+
+        let sanitized = Wav2Vec2STTModel.sanitize(weights: weights)
+
+        #expect(sanitized["feature_projection.layer_norm.weight"] != nil)
+        #expect(sanitized["lm_head.weight"] == nil)
+    }
+
+    @Test func greedyCTCCollapsesRepeatsAndBlank() {
+        var values = Array(repeating: Float(-10), count: 1 * 7 * 4)
+        let sequence = [0, 1, 1, 0, 2, 2, 3]
+        for (time, token) in sequence.enumerated() {
+            values[time * 4 + token] = 10
+        }
+        let logits = MLXArray(values, [1, 7, 4])
+
+        let decoded = Wav2Vec2CTCModel.greedyCTCTokens(logits: logits, blankTokenId: 0)
+
+        #expect(decoded == [[1, 2, 3]])
+    }
+
+    @Test func vocabularyDecodeSelectsLanguageAndPipeSpace() {
+        let config = Wav2Vec2STTConfig(
+            vocabSize: 4,
+            hiddenSize: 8,
+            numHiddenLayers: 0,
+            numAttentionHeads: 2,
+            intermediateSize: 16,
+            numConvPosEmbeddingGroups: 2
+        )
+        let model = Wav2Vec2CTCModel(
+            config: config,
+            vocabulary: [1: "h", 2: "|", 3: "i"],
+            vocabularies: [
+                "eng": [1: "h", 2: "|", 3: "i"],
+                "fra": [1: "s", 2: "|", 3: "a"],
+            ]
+        )
+
+        #expect(model.decode(tokens: [1, 2, 3], language: "en") == "h i")
+        #expect(model.decode(tokens: [1, 2, 3], language: "fra") == "s a")
+    }
+
+    @Test func tinyForwardProducesCTCLogits() {
+        let config = Wav2Vec2STTConfig(
+            vocabSize: 6,
+            hiddenSize: 8,
+            numHiddenLayers: 0,
+            numAttentionHeads: 2,
+            intermediateSize: 16,
+            hiddenDropout: 0,
+            activationDropout: 0,
+            featProjDropout: 0,
+            convDim: [4],
+            convStride: [2],
+            convKernel: [4],
+            numConvPosEmbeddings: 4,
+            numConvPosEmbeddingGroups: 2
+        )
+        let model = Wav2Vec2CTCModel(config: config)
+        model.train(false)
+
+        let logits = model(MLXArray.zeros([1, 64]))
+        eval(logits)
+
+        #expect(logits.shape == [1, 31, 6])
+    }
+}
+
+struct LasrCTCSTTTests {
+    static func smallEncoderConfig(layers: Int = 1) -> LasrEncoderConfig {
+        LasrEncoderConfig(
+            hiddenSize: 32,
+            numHiddenLayers: layers,
+            numAttentionHeads: 4,
+            numKeyValueHeads: 4,
+            intermediateSize: 64,
+            convKernelSize: 5,
+            numMelBins: 16,
+            subsamplingConvChannels: 24,
+            subsamplingConvKernelSize: 3,
+            subsamplingConvStride: 2,
+            dropout: 0,
+            attentionDropout: 0,
+            activationDropout: 0
+        )
+    }
+
+    @Test func configDecodesNestedEncoderAndRopeParameters() throws {
+        let json = """
+        {
+          "vocab_size": 2000,
+          "pad_token_id": 1,
+          "ctc_loss_reduction": "sum",
+          "encoder_config": {
+            "hidden_size": 128,
+            "num_hidden_layers": 4,
+            "num_mel_bins": 80,
+            "rope_parameters": {
+              "rope_theta": 5000.0,
+              "rope_type": "default"
+            }
+          }
+        }
+        """
+
+        let config = try JSONDecoder().decode(LasrCTCConfig.self, from: Data(json.utf8))
+
+        #expect(config.vocabSize == 2000)
+        #expect(config.padTokenId == 1)
+        #expect(config.ctcLossReduction == "sum")
+        #expect(config.encoderConfig.hiddenSize == 128)
+        #expect(config.encoderConfig.numHiddenLayers == 4)
+        #expect(config.encoderConfig.numMelBins == 80)
+        #expect(config.encoderConfig.ropeTheta == 5000)
+    }
+
+    @Test func encoderForwardShape() {
+        let encoder = LasrEncoder(config: Self.smallEncoderConfig())
+        encoder.train(false)
+
+        let input = MLXRandom.normal([1, 50, 16])
+        let output = encoder(input)
+        eval(output)
+
+        #expect(output.shape[0] == 1)
+        #expect(output.shape[2] == 32)
+        #expect(output.shape[1] > 0)
+    }
+
+    @Test func modelForwardShape() {
+        let config = LasrCTCConfig(vocabSize: 100, encoderConfig: Self.smallEncoderConfig())
+        let model = LasrCTCModel(config: config)
+        model.train(false)
+
+        let logits = model(MLXRandom.normal([2, 60, 16]))
+        eval(logits)
+
+        #expect(logits.shape[0] == 2)
+        #expect(logits.shape[2] == 100)
+    }
+
+    @Test func sanitizerTransposesConvAndSqueezesCTCHead() {
+        let weights: [String: MLXArray] = [
+            "encoder.layers.0.conv.depthwise_conv.weight": MLXArray.ones([32, 1, 5]),
+            "ctc_head.weight": MLXArray.ones([12, 32, 1]),
+            "encoder.rotary_emb.inv_freq": MLXArray.ones([4]),
+        ]
+
+        let sanitized = LasrCTCModel.sanitize(weights: weights)
+
+        #expect(sanitized["encoder.layers.0.conv.depthwise_conv.weight"]?.shape == [32, 5, 1])
+        #expect(sanitized["ctc_head.weight"]?.shape == [12, 32])
+        #expect(sanitized["encoder.rotary_emb.inv_freq"] == nil)
+    }
+}
+
+struct MoonshineSTTTests {
+    static func tinyConfig(tieWordEmbeddings: Bool = true) -> MoonshineConfig {
+        MoonshineConfig(
+            vocabSize: 16,
+            hiddenSize: 16,
+            intermediateSize: 32,
+            encoderNumHiddenLayers: 1,
+            decoderNumHiddenLayers: 1,
+            encoderNumAttentionHeads: 4,
+            decoderNumAttentionHeads: 4,
+            encoderNumKeyValueHeads: 4,
+            decoderNumKeyValueHeads: 4,
+            maxPositionEmbeddings: 64,
+            partialRotaryFactor: 0.5,
+            bosTokenId: 1,
+            eosTokenId: 2,
+            decoderStartTokenId: 1,
+            tieWordEmbeddings: tieWordEmbeddings
+        )
+    }
+
+    @Test func configDecodesKeyValueHeadFallbacks() throws {
+        let json = """
+        {
+          "model_type": "moonshine",
+          "vocab_size": 64,
+          "hidden_size": 32,
+          "intermediate_size": 96,
+          "encoder_num_hidden_layers": 2,
+          "decoder_num_hidden_layers": 3,
+          "encoder_num_attention_heads": 4,
+          "decoder_num_attention_heads": 8,
+          "partial_rotary_factor": 0.25,
+          "tie_word_embeddings": false
+        }
+        """
+
+        let config = try JSONDecoder().decode(MoonshineConfig.self, from: Data(json.utf8))
+
+        #expect(config.vocabSize == 64)
+        #expect(config.hiddenSize == 32)
+        #expect(config.encoderNumKeyValueHeads == 4)
+        #expect(config.decoderNumKeyValueHeads == 8)
+        #expect(config.partialRotaryFactor == 0.25)
+        #expect(config.tieWordEmbeddings == false)
+    }
+
+    @Test func sanitizerStripsModelPrefixTransposesConvAndDropsTiedHead() {
+        let weights: [String: MLXArray] = [
+            "model.encoder.conv1.weight": MLXArray.ones([16, 1, 127]),
+            "model.decoder.embed_tokens.weight": MLXArray.ones([16, 16]),
+            "proj_out.weight": MLXArray.ones([16, 16]),
+        ]
+
+        let tied = MoonshineModel.sanitize(weights: weights, tieWordEmbeddings: true)
+        let untied = MoonshineModel.sanitize(weights: weights, tieWordEmbeddings: false)
+
+        #expect(tied["encoder.conv1.weight"]?.shape == [16, 127, 1])
+        #expect(tied["decoder.embed_tokens.weight"]?.shape == [16, 16])
+        #expect(tied["proj_out.weight"] == nil)
+        #expect(untied["proj_out.weight"]?.shape == [16, 16])
+    }
+
+    @Test func encoderDecoderAndLogitsShapes() {
+        let config = Self.tinyConfig()
+        let model = MoonshineModel(config: config)
+        model.train(false)
+
+        let encoderOut = model.encoder(MLXArray.zeros([1, 4096], type: Float.self))
+        let tokens = MLXArray([Int32(1), Int32(3), Int32(4)]).reshaped(1, 3).asType(.int32)
+        let decoderOut = model.decoder(tokens, encoderHiddenStates: encoderOut)
+        let logits = model.logitsForHidden(decoderOut)
+        eval(logits)
+
+        #expect(encoderOut.shape[0] == 1)
+        #expect(encoderOut.shape[2] == 16)
+        #expect(decoderOut.shape == [1, 3, 16])
+        #expect(logits.shape == [1, 3, 16])
+    }
+
+    @Test func oneTokenGenerateSmoke() {
+        let model = MoonshineModel(config: Self.tinyConfig())
+        model.train(false)
+
+        let output = model.generate(
+            audio: MLXArray.zeros([4096], type: Float.self),
+            generationParameters: STTGenerateParameters(maxTokens: 1, temperature: 0)
+        )
+
+        #expect(output.totalTokens >= 1)
+        #expect(output.generationTokens <= 1)
+    }
+}
+
+struct CanarySTTTests {
+    static func tinyConfig() -> CanaryConfig {
+        CanaryConfig(
+            preprocessor: CanaryPreprocessConfig(features: 16),
+            encoder: CanaryEncoderConfig(
+                featIn: 16,
+                nLayers: 1,
+                dModel: 16,
+                nHeads: 4,
+                ffExpansionFactor: 2,
+                subsamplingFactor: 2,
+                convKernelSize: 5,
+                subsamplingConvChannels: 8,
+                posEmbMaxLen: 128,
+                xscaling: false
+            ),
+            decoder: CanaryDecoderConfig(
+                numLayers: 1,
+                hiddenSize: 16,
+                numAttentionHeads: 4,
+                innerSize: 32
+            ),
+            vocabSize: 20,
+            encoderOutputDim: 16,
+            supportedLanguages: ["en", "de"]
+        )
+    }
+
+    @Test func configDecodesNestedDecoderAndDefaults() throws {
+        let json = """
+        {
+          "model_type": "canary",
+          "vocab_size": 100,
+          "enc_output_dim": 64,
+          "preprocessor": {
+            "features": 80,
+            "sample_rate": 16000
+          },
+          "encoder": {
+            "feat_in": 80,
+            "n_layers": 2,
+            "d_model": 64,
+            "n_heads": 4
+          },
+          "transf_decoder": {
+            "decoder": {
+              "num_layers": 3,
+              "hidden_size": 64,
+              "num_attention_heads": 8,
+              "inner_size": 128
+            }
+          },
+          "supported_languages": ["en", "de"]
+        }
+        """
+
+        let config = try JSONDecoder().decode(CanaryConfig.self, from: Data(json.utf8))
+
+        #expect(config.modelType == "canary")
+        #expect(config.vocabSize == 100)
+        #expect(config.encoderOutputDim == 64)
+        #expect(config.preprocessor.features == 80)
+        #expect(config.encoder.nLayers == 2)
+        #expect(config.encoder.dModel == 64)
+        #expect(config.decoder.numLayers == 3)
+        #expect(config.decoder.numAttentionHeads == 8)
+        #expect(config.supportedLanguages == ["en", "de"])
+    }
+
+    @Test func tokenizerBuildsPromptFromTokensFile() throws {
+        let dir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("canary-tokenizer-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: dir) }
+
+        let tokens = """
+        <|startofcontext|> 10
+        <|startoftranscript|> 11
+        <|emo:undefined|> 12
+        <|en|> 13
+        <|de|> 14
+        <|pnc|> 15
+        <|noitn|> 16
+        <|notimestamp|> 17
+        <|nodiarize|> 18
+        <|endoftext|> 19
+        ▁Hallo 5
+        """
+        try tokens.write(to: dir.appendingPathComponent("tokens.txt"), atomically: true, encoding: .utf8)
+
+        let config = CanaryConfig(supportedLanguages: ["en", "de"])
+        let loadedTokenizer = try CanaryTokenizer.fromModelDirectory(dir, config: config)
+        let tokenizer = try #require(loadedTokenizer)
+        let prompt = tokenizer.buildPromptTokens(config: config, sourceLanguage: "en", targetLanguage: "de")
+
+        #expect(prompt == [10, 11, 12, 13, 14, 15, 16, 17, 18])
+        #expect(tokenizer.eosTokenId(config: config) == 19)
+        #expect(tokenizer.decode([5]) == "Hallo")
+    }
+
+    @Test func sanitizerMapsMLXNativeAndNemoKeys() {
+        let mlxNative: [String: MLXArray] = [
+            "encoder.pre_encode.conv0.weight": MLXArray.ones([8, 3, 3, 1]),
+            "encoder.pre_encode.conv.0.weight": MLXArray.ones([8, 3, 3, 1]),
+            "encoder.pre_encode.conv.2.weight": MLXArray.ones([8, 3, 3, 1]),
+            "encoder.pre_encode.conv.4.weight": MLXArray.ones([8, 3, 3, 1]),
+            "encoder.layers.0.self_attn.pos_bias_u": MLXArray.ones([8, 16]),
+            "encoder.layers.0.self_attn.pos_bias_v": MLXArray.ones([8, 16]),
+            "transf_decoder.layers.0.first_sub_layer.linear_q.weight": MLXArray.ones([16, 16]),
+            "transf_decoder.layers.0.third_sub_layer.linear1.bias": MLXArray.ones([32]),
+            "head.classifier.weight": MLXArray.ones([20, 16]),
+            "encoder_decoder_proj.weight": MLXArray.ones([16, 16]),
+        ]
+        let sanitizedMLX = CanaryModel.sanitize(weights: mlxNative)
+
+        #expect(sanitizedMLX["encoder.conformer.pre_encode.conv0.weight"]?.shape == [8, 3, 3, 1])
+        #expect(sanitizedMLX["encoder.conformer.pre_encode.depthwise_layers.0.weight"]?.shape == [8, 3, 3, 1])
+        #expect(sanitizedMLX["encoder.conformer.pre_encode.pointwise_layers.0.weight"]?.shape == nil)
+        #expect(sanitizedMLX["encoder.conformer.layers.0.self_attn.posBiasU"]?.shape == [8, 16])
+        #expect(sanitizedMLX["encoder.conformer.layers.0.self_attn.posBiasV"]?.shape == [8, 16])
+        #expect(sanitizedMLX["decoder.blocks.0.self_attn.q_proj.weight"]?.shape == [16, 16])
+        #expect(sanitizedMLX["decoder.blocks.0.ff1.bias"]?.shape == [32])
+        #expect(sanitizedMLX["decoder.output_proj.weight"]?.shape == [20, 16])
+        #expect(sanitizedMLX["encoder_decoder_proj.weight"] == nil)
+
+        let nemo: [String: MLXArray] = [
+            "encoder.pre_encode.conv0.weight": MLXArray.ones([8, 1, 3, 3]),
+            "transf_decoder._decoder.layers.0.first_sub_layer.query_net.weight": MLXArray.ones([16, 16]),
+            "transf_decoder._decoder.layers.0.third_sub_layer.dense_in.bias": MLXArray.ones([32]),
+            "log_softmax.mlp.layer0.weight": MLXArray.ones([20, 16]),
+            "transf_decoder._embedding.position_embedding.pe": MLXArray.ones([10, 16]),
+        ]
+        let sanitizedNemo = CanaryModel.sanitize(weights: nemo)
+
+        #expect(sanitizedNemo["encoder.conformer.pre_encode.conv0.weight"]?.shape == [8, 3, 3, 1])
+        #expect(sanitizedNemo["decoder.blocks.0.self_attn.q_proj.weight"]?.shape == [16, 16])
+        #expect(sanitizedNemo["decoder.blocks.0.ff1.bias"]?.shape == [32])
+        #expect(sanitizedNemo["decoder.output_proj.weight"]?.shape == [20, 16])
+        #expect(sanitizedNemo["decoder.position_embedding.pe"] == nil)
+    }
+
+    @Test func encoderDecoderAndGenerateShapes() {
+        let model = CanaryModel(config: Self.tinyConfig())
+        model.train(false)
+
+        let mel = MLXRandom.normal([1, 24, 16])
+        let encoded = model.encode(mel: mel)
+        let prompt = MLXArray([Int32(0), Int32(1), Int32(2)]).reshaped(1, 3).asType(.int32)
+        let logits = model.decoder(prompt, encoderOutput: encoded.hidden, encoderMask: encoded.mask)
+        eval(logits)
+
+        #expect(encoded.hidden.shape[0] == 1)
+        #expect(encoded.hidden.shape[2] == 16)
+        #expect(encoded.mask.shape == [1, encoded.hidden.shape[1]])
+        #expect(logits.shape == [1, 3, 20])
+
+        let output = model.generate(
+            audio: mel,
+            generationParameters: STTGenerateParameters(maxTokens: 1, temperature: 0, language: "en")
+        )
+        #expect(output.promptTokens == 3)
+        #expect(output.generationTokens <= 1)
     }
 }
 
@@ -1296,6 +1848,102 @@ struct Qwen3ASRModuleSetupTests {
         // ForcedAligner should keep lm_head
         #expect(sanitized["lm_head.weight"] != nil)
         #expect(sanitized["model.norm.weight"] != nil)
+    }
+}
+
+struct MossTranscribeDiarizeModuleSetupTests {
+
+    @Test func mossConfigDefaults() throws {
+        let config = MossTranscribeDiarizeConfig()
+
+        #expect(config.modelType == "moss_transcribe_diarize")
+        #expect(config.audioConfig.numMelBins == 80)
+        #expect(config.audioConfig.dModel == 1024)
+        #expect(config.textConfig.hiddenSize == 1024)
+        #expect(config.audioMergeSize == 4)
+        #expect(config.adaptorInputDim == 4096)
+        #expect(config.sampleRate == 16000)
+    }
+
+    @Test func mossConfigDecodesNestedConfig() throws {
+        let json = """
+        {
+          "model_type": "moss_transcribe_diarize",
+          "audio_token_id": 123,
+          "audio_merge_size": 2,
+          "audio_config": {
+            "model_type": "whisper",
+            "num_mel_bins": 80,
+            "d_model": 512,
+            "encoder_layers": 2,
+            "encoder_attention_heads": 8,
+            "encoder_ffn_dim": 2048,
+            "max_source_positions": 1500
+          },
+          "text_config": {
+            "model_type": "qwen3",
+            "vocab_size": 32000,
+            "hidden_size": 768,
+            "intermediate_size": 2048,
+            "num_hidden_layers": 2,
+            "num_attention_heads": 8,
+            "num_key_value_heads": 4,
+            "head_dim": 96,
+            "rms_norm_eps": 0.000001,
+            "tie_word_embeddings": true
+          },
+          "tie_word_embeddings": true
+        }
+        """
+
+        let config = try JSONDecoder().decode(MossTranscribeDiarizeConfig.self, from: Data(json.utf8))
+
+        #expect(config.audioTokenId == 123)
+        #expect(config.audioConfig.dModel == 512)
+        #expect(config.textConfig.hiddenSize == 768)
+        #expect(config.audioMergeSize == 2)
+        #expect(config.adaptorInputDim == 1024)
+        #expect(config.textConfig.tieWordEmbeddings)
+    }
+
+    @Test func mossSanitizeMapsHFKeys() {
+        let weights: [String: MLXArray] = [
+            "model.vq_adaptor.layers.layers.0.weight": MLXArray.zeros([4, 4]),
+            "model.vq_adwaptor.layers.2.bias": MLXArray.zeros([4]),
+            "model.whisper_encoder.conv1.weight": MLXArray.zeros([8, 80, 3]),
+            "lm_head.weight": MLXArray.zeros([8, 8]),
+        ]
+
+        let sanitized = MossTranscribeDiarizeModel.sanitize(weights: weights)
+
+        #expect(sanitized["model.vq_adaptor.layers.layers.0.weight"] != nil)
+        #expect(sanitized["model.vq_adaptor.layers.layers.2.bias"] != nil)
+        #expect(sanitized["lm_head.weight"] == nil)
+        #expect(sanitized["model.whisper_encoder.conv1.weight"]?.shape == [8, 3, 80])
+    }
+
+    @Test func mossParseSegments() {
+        let text = "[0.48][S01]hello[1.66][2.00][S02]world[3.50]"
+
+        let segments = MossTranscribeDiarizeModel.parseSegments(text: text, fallbackEnd: 10.0)
+
+        #expect(segments.count == 2)
+        #expect(segments[0]["start"] as? Double == 0.48)
+        #expect(segments[0]["end"] as? Double == 1.66)
+        #expect(segments[0]["speaker_id"] as? String == "S01")
+        #expect(segments[0]["text"] as? String == "[S01] hello")
+        #expect(segments[1]["speaker_id"] as? String == "S02")
+    }
+
+    @Test func mossParseSegmentsFallback() {
+        let text = "[S01] hello world"
+
+        let segments = MossTranscribeDiarizeModel.parseSegments(text: text, fallbackEnd: 4.25)
+
+        #expect(segments.count == 1)
+        #expect(segments[0]["start"] as? Double == 0.0)
+        #expect(segments[0]["end"] as? Double == 4.25)
+        #expect(segments[0]["text"] as? String == text)
     }
 }
 
@@ -2525,6 +3173,217 @@ struct ParakeetSTTTests {
     }
 }
 
+struct NemotronASRTests {
+    private var mlxRuntimeEnabled: Bool {
+        ProcessInfo.processInfo.environment["MLXAUDIO_ENABLE_MLX_RUNTIME_TESTS"] == "1"
+    }
+
+    private func tinyConfigJSON() -> String {
+        """
+        {
+          "model_type": "nemotron_asr",
+          "preprocessor": {
+            "sample_rate": 16000,
+            "features": 16,
+            "n_fft": 64,
+            "window_size": 0.004,
+            "window_stride": 0.002,
+            "window": "hann",
+            "preemph": 0.97,
+            "dither": 0.0,
+            "normalize": "NA"
+          },
+          "encoder": {
+            "feat_in": 16,
+            "n_layers": 1,
+            "d_model": 16,
+            "n_heads": 2,
+            "ff_expansion_factor": 2,
+            "subsampling_factor": 4,
+            "subsampling_conv_channels": 4,
+            "conv_kernel_size": 3,
+            "causal_downsampling": true,
+            "conv_context_size": "causal",
+            "conv_norm_type": "layer_norm",
+            "self_attention_model": "rel_pos",
+            "att_context_style": "chunked_limited",
+            "att_context_size": [[4, 1]],
+            "pos_emb_max_len": 64,
+            "use_bias": false,
+            "xscaling": false
+          },
+          "prompt": {
+            "num_prompts": 4,
+            "prompt_hidden": 16,
+            "prompt_dictionary": {"en-US": 0, "auto": 1}
+          },
+          "decoder": {
+            "pred_hidden": 8,
+            "pred_rnn_layers": 1,
+            "vocab_size": 6,
+            "blank_as_pad": true
+          },
+          "joint": {
+            "joint_hidden": 8,
+            "activation": "relu",
+            "encoder_hidden": 16,
+            "pred_hidden": 8,
+            "num_classes": 6
+          },
+          "vocabulary": ["<unk>", "<en-US>", "▁hello", "▁world", "!", "a"],
+          "default_language": "auto",
+          "default_att_context_size": [4, 1],
+          "max_symbols": 3
+        }
+        """
+    }
+
+    private func tinyModel() throws -> NemotronASRModel {
+        let config = try JSONDecoder().decode(NemotronASRConfig.self, from: Data(tinyConfigJSON().utf8))
+        let model = NemotronASRModel(config)
+        eval(model.parameters())
+        model.train(false)
+        return model
+    }
+
+    @Test func configDecodesPromptAndStreamingContext() throws {
+        let config = try JSONDecoder().decode(NemotronASRConfig.self, from: Data(tinyConfigJSON().utf8))
+        #expect(config.modelType == "nemotron_asr")
+        #expect(config.encoder.causalDownsampling == true)
+        #expect(config.encoder.attContextSize == [[4, 1]])
+        #expect(config.prompt.promptDictionary["en-US"] == 0)
+        #expect(config.defaultLanguage == "auto")
+    }
+
+    @Test func chunkedLimitedMaskMatchesNeMoVisibility() {
+        guard mlxRuntimeEnabled else {
+            print("Skipping Nemotron ASR MLX runtime test. Set MLXAUDIO_ENABLE_MLX_RUNTIME_TESTS=1 to enable.")
+            return
+        }
+
+        let mask = NemotronASRAttentionMask.createChunkedLimitedMask(seqLen: 6, leftContext: 2, rightContext: 1)
+        let values = mask[0, 0].asArray(Float.self)
+
+        func visibleRow(_ row: Int) -> [Bool] {
+            let start = row * 6
+            return (0..<6).map { values[start + $0] == 0 }
+        }
+
+        #expect(visibleRow(0) == [true, true, false, false, false, false])
+        #expect(visibleRow(2) == [true, true, true, true, false, false])
+        #expect(visibleRow(5) == [false, false, true, true, true, true])
+    }
+
+    @Test func encoderAndPromptShapes() throws {
+        guard mlxRuntimeEnabled else {
+            print("Skipping Nemotron ASR MLX runtime test. Set MLXAUDIO_ENABLE_MLX_RUNTIME_TESTS=1 to enable.")
+            return
+        }
+
+        let model = try tinyModel()
+        let values = moduloFloatFixtureValues(count: 1 * 40 * 16, modulus: 17, divisor: 17.0)
+        let mel = MLXArray(values).reshaped([1, 40, 16])
+
+        let encoded = model.encoder(mel, attContextSize: [4, 1])
+        let prompted = model.applyPrompt(encoded.0, language: "en-US")
+
+        #expect(encoded.0.shape[0] == 1)
+        #expect(encoded.0.shape[2] == model.encoderConfig.dModel)
+        #expect(prompted.shape == encoded.0.shape)
+        #expect(encoded.0.shape[1] == Int(encoded.1[0].item(Int32.self)))
+    }
+
+    @Test func decodeRunsWithoutLeakingLanguageTags() throws {
+        guard mlxRuntimeEnabled else {
+            print("Skipping Nemotron ASR MLX runtime test. Set MLXAUDIO_ENABLE_MLX_RUNTIME_TESTS=1 to enable.")
+            return
+        }
+
+        let model = try tinyModel()
+        let sampleCount = 48 * 16
+        let values = moduloFloatFixtureValues(count: sampleCount, multiplier: 7, modulus: 23, divisor: 23.0)
+        let mel = MLXArray(values).reshaped([1, 48, 16])
+        let result = model.decode(mel: mel, language: "auto", attContextSize: [4, 1])
+
+        #expect(result.text.contains("<") == false)
+    }
+
+    @Test func tokenizerStripsLanguageTags() {
+        let vocab = ["<unk>", "<en-US>", "▁hello", "▁world", "!", "<"]
+        #expect(NemotronASRTokenizer.isLanguageTag("<en-US>") == true)
+        #expect(NemotronASRTokenizer.isLanguageTag("<") == false)
+        #expect(NemotronASRTokenizer.isSpecialToken(1, vocabulary: vocab) == true)
+        #expect(NemotronASRTokenizer.isSpecialToken(2, vocabulary: vocab) == false)
+        #expect(NemotronASRTokenizer.decode(tokens: [1, 2, 3, 4], vocabulary: vocab) == " hello world!")
+        #expect(
+            NemotronASRTokenizer.decode(tokens: [1, 2, 3, 4], vocabulary: vocab, stripLanguageTags: false)
+            == "<en-US> hello world!"
+        )
+        #expect(NemotronASRTokenizer.detectedLanguage(tokens: [1, 2, 3], vocabulary: vocab) == "en-US")
+    }
+
+    /// Synthetic 16 kHz waveform long enough to span several native chunks.
+    private func syntheticAudio(samples: Int) -> MLXArray {
+        let values = (0..<samples).map { i in
+            0.1 * sin(Float(i) * 0.05) + 0.05 * sin(Float(i) * 0.17)
+        }
+        return MLXArray(values)
+    }
+
+    private func wholeStreamText(_ model: NemotronASRModel, _ audio: MLXArray) async throws -> String {
+        var text = ""
+        for try await event in model.generateStream(
+            audio: audio,
+            generationParameters: STTGenerateParameters(language: "en-US")
+        ) {
+            if case let .result(out) = event { text = out.text }
+        }
+        return text
+    }
+
+    private func sessionText(_ model: NemotronASRModel, _ audio: MLXArray, feed: Int) -> (String, [Int]) {
+        let samples = audio.asArray(Float.self)
+        let session = model.makeStreamSession(language: "en-US")
+        var i = 0
+        while i < samples.count {
+            let e = min(i + feed, samples.count)
+            _ = session.step(Array(samples[i..<e]))
+            i = e
+        }
+        _ = session.finish()
+        return (session.text, session.tokens)
+    }
+
+    /// The incremental session, fed in small chunks, must reproduce the one-shot
+    /// `generateStream(wholeAudio)` transcript bit-for-bit (frozen-frame framing +
+    /// resumable encoder/RNN-T state).
+    @Test func streamSessionMatchesGenerateStream() async throws {
+        guard mlxRuntimeEnabled else {
+            print("Skipping Nemotron ASR MLX runtime test. Set MLXAUDIO_ENABLE_MLX_RUNTIME_TESTS=1 to enable.")
+            return
+        }
+        let model = try tinyModel()
+        let audio = syntheticAudio(samples: 6000)
+        let whole = try await wholeStreamText(model, audio)
+        let (sessioned, tokens) = sessionText(model, audio, feed: 200)
+        #expect(sessioned == whole)
+        #expect(tokens.isEmpty == false)  // random weights still emit non-blank tokens
+    }
+
+    /// Output must be invariant to feed granularity: tiny chunks == large chunks.
+    @Test func streamSessionFeedGranularityInvariant() throws {
+        guard mlxRuntimeEnabled else {
+            print("Skipping Nemotron ASR MLX runtime test. Set MLXAUDIO_ENABLE_MLX_RUNTIME_TESTS=1 to enable.")
+            return
+        }
+        let model = try tinyModel()
+        let audio = syntheticAudio(samples: 6000)
+        let (fine, _) = sessionText(model, audio, feed: 96)
+        let (coarse, _) = sessionText(model, audio, feed: 1500)
+        #expect(fine == coarse)
+    }
+}
+
 struct VoxtralRealtimeSTTTests {
     @Test func configDecodesNestedAudioEncodingArgs() throws {
         let json = """
@@ -2727,6 +3586,91 @@ struct VoxtralRealtimeSTTTests {
         #expect(output.generationTokens == 0)
         #expect(output.totalTokens == output.promptTokens)
         #expect(output.text == "")
+    }
+
+    @Test func streamSessionMatchesOfflineOnFixture() throws {
+        let fixtureDir = try Self.makeEOSFixture()
+        defer { try? FileManager.default.removeItem(at: fixtureDir) }
+
+        let model = try VoxtralRealtimeModel.fromDirectory(fixtureDir)
+        let samples = Array(repeating: Float(0), count: 16000)
+        let params = STTGenerateParameters(maxTokens: 8, temperature: 0.0)
+
+        let offline = model.generate(audio: MLXArray(samples), generationParameters: params)
+
+        // Feed the identical audio in 80 ms (1280-sample) chunks through the online path.
+        let session = model.makeStreamSession(maxTokens: 8)
+        var idx = 0
+        while idx < samples.count {
+            let end = min(idx + 1280, samples.count)
+            _ = session.step(Array(samples[idx..<end]))
+            idx = end
+        }
+        _ = session.finish()
+
+        // Online transcript must equal the offline transcript (WER 0).
+        #expect(session.text == offline.text)
+        #expect(session.tokens.count == offline.generationTokens)
+    }
+
+    /// Minimal all-zero fixture: argmax always lands on the EOS id, so both paths
+    /// terminate immediately and must agree.
+    static func makeEOSFixture() throws -> URL {
+        let fixtureDir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("voxtral-fixture-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: fixtureDir, withIntermediateDirectories: true)
+
+        let configJSON = """
+        {
+          "model_type": "voxtral_realtime",
+          "encoder_args": {
+            "dim": 16, "n_layers": 0, "n_heads": 2, "head_dim": 8, "hidden_dim": 32,
+            "n_kv_heads": 2, "norm_eps": 1e-5, "rope_theta": 1000000,
+            "sliding_window": 64, "causal": true, "use_biases": true, "downsample_factor": 4
+          },
+          "decoder": {
+            "dim": 16, "n_layers": 0, "n_heads": 2, "n_kv_heads": 2, "head_dim": 8,
+            "hidden_dim": 32, "vocab_size": 8, "norm_eps": 1e-5, "rope_theta": 1000000,
+            "sliding_window": 64, "tied_embeddings": true,
+            "ada_rms_norm_t_cond": false, "ada_rms_norm_t_cond_dim": 4
+          },
+          "audio_encoding_args": {
+            "sampling_rate": 16000, "frame_rate": 12.5, "num_mel_bins": 128,
+            "hop_length": 160, "window_size": 400, "global_log_mel_max": 1.5
+          },
+          "transcription_delay_ms": 0, "bos_token_id": 1, "eos_token_id": 0,
+          "streaming_pad_token_id": 2, "n_left_pad_tokens": 1
+        }
+        """
+        try configJSON.write(
+            to: fixtureDir.appendingPathComponent("config.json"), atomically: true, encoding: .utf8)
+
+        let tekkenJSON = """
+        {
+          "vocab": [
+            {"token_bytes":"YQ=="},{"token_bytes":"Yg=="},{"token_bytes":"Yw=="},
+            {"token_bytes":"ZA=="},{"token_bytes":"ZQ=="},{"token_bytes":"Zg=="},
+            {"token_bytes":"Zw=="},{"token_bytes":"aA=="}
+          ],
+          "config":{"default_num_special_tokens":0},"special_tokens":[]
+        }
+        """
+        try tekkenJSON.write(
+            to: fixtureDir.appendingPathComponent("tekken.json"), atomically: true, encoding: .utf8)
+
+        let weights: [String: MLXArray] = [
+            "encoder.conv_layers_0_conv.conv.weight": MLXArray.zeros([16, 3, 128], type: Float.self),
+            "encoder.conv_layers_0_conv.conv.bias": MLXArray.zeros([16], type: Float.self),
+            "encoder.conv_layers_1_conv.conv.weight": MLXArray.zeros([16, 3, 16], type: Float.self),
+            "encoder.conv_layers_1_conv.conv.bias": MLXArray.zeros([16], type: Float.self),
+            "encoder.transformer_norm.weight": MLXArray.ones([16], type: Float.self),
+            "encoder.audio_language_projection_0.weight": MLXArray.zeros([16, 64], type: Float.self),
+            "encoder.audio_language_projection_2.weight": MLXArray.zeros([16, 16], type: Float.self),
+            "decoder.tok_embeddings.weight": MLXArray.zeros([8, 16], type: Float.self),
+            "decoder.norm.weight": MLXArray.ones([16], type: Float.self),
+        ]
+        try MLX.save(arrays: weights, url: fixtureDir.appendingPathComponent("model.safetensors"))
+        return fixtureDir
     }
 }
 
@@ -3239,4 +4183,157 @@ struct GraniteSpeechModuleTests {
     }
 
 
+}
+
+// MARK: - Whisper Tests
+
+@Suite("Whisper Tests", .serialized)
+struct WhisperTests {
+
+    @Test func configDefaultsMatchOpenAIWhisperTiny() {
+        let defaults = WhisperConfig()
+        #expect(defaults.modelType == "whisper")
+        #expect(defaults.dModel == 384)
+        #expect(defaults.encoderLayers == 4)
+        #expect(defaults.decoderLayers == 4)
+        #expect(defaults.numMelBins == 80)
+        #expect(defaults.maxSourcePositions == 1500)
+        #expect(defaults.maxTargetPositions == 448)
+        #expect(defaults.decoderStartTokenId == 50258)
+    }
+
+    @Test func configDecodingMatchesHuggingFaceLayout() throws {
+        let json = """
+        {
+          "model_type": "whisper",
+          "vocab_size": 51866,
+          "num_mel_bins": 128,
+          "d_model": 1280,
+          "encoder_layers": 32,
+          "encoder_attention_heads": 20,
+          "encoder_ffn_dim": 5120,
+          "max_source_positions": 1500,
+          "decoder_layers": 4,
+          "decoder_attention_heads": 20,
+          "decoder_ffn_dim": 5120,
+          "max_target_positions": 448,
+          "decoder_start_token_id": 50258,
+          "eos_token_id": 50257,
+          "pad_token_id": 50257,
+          "bos_token_id": 50257
+        }
+        """
+        let cfg = try JSONDecoder().decode(WhisperConfig.self, from: Data(json.utf8))
+        // This is the turbo shape — 32 encoder layers, 4 decoder layers.
+        #expect(cfg.dModel == 1280)
+        #expect(cfg.encoderLayers == 32)
+        #expect(cfg.decoderLayers == 4)
+        #expect(cfg.numMelBins == 128)
+    }
+
+    @Test func encoderFeaturesProduceCanonicalWindow() {
+        // 5 s of zeros should still pad to the 30 s window and produce 3000
+        // mel frames — Whisper's encoder expects exactly that shape.
+        let audio = MLXArray.zeros([5 * 16000], type: Float.self)
+        let features = WhisperAudio.encoderFeatures(audio: audio, nMels: 80)
+        #expect(features.shape == [1, 3000, 80])
+    }
+
+    @Test func encoderForwardShapeMatchesEncoderHidden() {
+        let config = WhisperConfig()
+        let encoder = WhisperEncoder(config: config)
+        let features = MLXArray.zeros([1, 3000, config.numMelBins], type: Float.self)
+        let hidden = encoder(features)
+        // Conv2 has stride 2, so 3000 -> 1500.
+        #expect(hidden.shape == [1, config.maxSourcePositions, config.dModel])
+    }
+}
+
+@Suite("Whisper Network Tests", .serialized)
+struct WhisperNetworkTests {
+
+    @Test func whisperFromPretrainedTranscribesShortAudio() async throws {
+        let env = ProcessInfo.processInfo.environment
+        guard env["MLXAUDIO_ENABLE_NETWORK_TESTS"] == "1" else {
+            print("Skipping network Whisper test. Set MLXAUDIO_ENABLE_NETWORK_TESTS=1 to enable.")
+            return
+        }
+
+        let repo = env["MLXAUDIO_WHISPER_REPO"] ?? "openai/whisper-tiny"
+        let model = try await WhisperModel.fromPretrained(repo)
+        let audio = try loadSTTNetworkFixture(sampleRate: 16000)
+        let output = model.generate(
+            audio: audio,
+            generationParameters: STTGenerateParameters(language: "en")
+        )
+
+        #expect(model.config.modelType == "whisper")
+        #expect(!output.text.isEmpty)
+        #expect(output.generationTokens > 0)
+    }
+
+    @Test func whisperStreamingYieldsIncrementalTokens() async throws {
+        let env = ProcessInfo.processInfo.environment
+        guard env["MLXAUDIO_ENABLE_NETWORK_TESTS"] == "1" else {
+            print("Skipping network Whisper streaming test. Set MLXAUDIO_ENABLE_NETWORK_TESTS=1 to enable.")
+            return
+        }
+
+        let repo = env["MLXAUDIO_WHISPER_REPO"] ?? "openai/whisper-tiny"
+        let model = try await WhisperModel.fromPretrained(repo)
+        let audio = try loadSTTNetworkFixture(sampleRate: 16000)
+
+        var streamedTokens: [String] = []
+        var finalOutput: STTOutput?
+        for try await event in model.generateStream(
+            audio: audio,
+            generationParameters: STTGenerateParameters(language: "en")
+        ) {
+            switch event {
+            case .token(let token):
+                streamedTokens.append(token)
+            case .result(let output):
+                finalOutput = output
+            case .info:
+                break
+            }
+        }
+
+        #expect(streamedTokens.count > 1)
+        #expect(finalOutput != nil)
+        // Streamed deltas should reconstruct the final transcript (single chunk).
+        let assembled = streamedTokens.joined().trimmingCharacters(in: .whitespacesAndNewlines)
+        let final = finalOutput?.text.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        #expect(assembled == final)
+    }
+
+    @Test func whisperHandlesLongAudioWithChunking() async throws {
+        let env = ProcessInfo.processInfo.environment
+        guard env["MLXAUDIO_ENABLE_NETWORK_TESTS"] == "1" else {
+            print("Skipping network Whisper long-audio test. Set MLXAUDIO_ENABLE_NETWORK_TESTS=1 to enable.")
+            return
+        }
+
+        let repo = env["MLXAUDIO_WHISPER_REPO"] ?? "openai/whisper-tiny"
+        let model = try await WhisperModel.fromPretrained(repo)
+
+        // Tile a short clip to force ≥ 2 chunk windows.
+        let baseAudio = try loadSTTNetworkFixture(sampleRate: 16000)
+        let baseSamples = baseAudio.dim(0)
+        let targetSamples = 45 * 16000
+        var pieces: [MLXArray] = []
+        var produced = 0
+        while produced < targetSamples {
+            pieces.append(baseAudio)
+            produced += baseSamples
+        }
+        let longAudio = MLX.concatenated(pieces, axis: 0)[0..<targetSamples]
+        let output = model.generate(
+            audio: longAudio,
+            generationParameters: STTGenerateParameters(language: "en")
+        )
+
+        #expect((output.segments?.count ?? 0) >= 2)
+        #expect(!output.text.isEmpty)
+    }
 }

@@ -123,6 +123,13 @@ public enum TTS {
                 pretrained: { try await EchoTTSModel.fromPretrained($0, cache: $1) },
                 local: { modelDir, _ in try await EchoTTSModel.fromModelDirectory(modelDir) }
             )
+        case "irodori_tts", "irodori":
+            return try await load(
+                source,
+                modelType: resolvedType,
+                pretrained: { try await IrodoriTTSModel.fromPretrained($0, cache: $1) },
+                local: { modelDir, _ in try await IrodoriTTSModel.fromModelDirectory(modelDir) }
+            )
         case "qwen3_tts":
             return try await load(
                 source,
@@ -194,6 +201,12 @@ public enum TTS {
                 pretrained: { try await KokoroModel.fromPretrained($0, textProcessor: processor, cache: $1) },
                 local: { modelDir, _ in try await KokoroModel.fromModelDirectory(modelDir, textProcessor: processor) }
             )
+        case "omnivoice":
+            return try await load(
+                source,
+                modelType: resolvedType,
+                pretrained: { try await OmniVoiceModel.fromPretrained($0, cache: $1) }
+            )
         default:
             throw TTSModelError.unsupportedModelType(resolvedType)
         }
@@ -252,6 +265,10 @@ public enum TTS {
 
     private static func inferModelType(from modelRepo: String) -> String? {
         let lower = modelRepo.lowercased()
+        // Repo names are hyphenated (e.g. "Irodori-TTS-600M-…"); match the bare name.
+        if lower.contains("irodori") {
+            return "irodori_tts"
+        }
         if lower.contains("qwen3_tts") {
             return "qwen3_tts"
         }
@@ -298,6 +315,9 @@ public enum TTS {
         }
         if lower.contains("kokoro") {
             return "kokoro"
+        }
+        if lower.contains("omnivoice") {
+            return "omnivoice"
         }
         return nil
     }
