@@ -458,40 +458,7 @@ class STTViewModel {
     }
 
     private func loadSTTModel(_ repo: String) async throws -> any STTGenerationModel {
-        let lower = repo.lowercased()
-
-        if lower.contains("glmasr") || lower.contains("glm-asr") {
-            return try await GLMASRModel.fromPretrained(repo)
-        }
-        if lower.contains("qwen3-asr") || lower.contains("qwen3_asr") {
-            return try await Qwen3ASRModel.fromPretrained(repo)
-        }
-        if lower.contains("voxtral") {
-            return try await VoxtralRealtimeModel.fromPretrained(repo)
-        }
-        if lower.contains("cohere") {
-            return try await CohereTranscribeModel.fromPretrained(repo)
-        }
-        if lower.contains("parakeet") {
-            return try await ParakeetModel.fromPretrained(repo)
-        }
-        if lower.contains("firered") || lower.contains("fire-red") {
-            return try await FireRedASR2Model.fromPretrained(repo)
-        }
-        if lower.contains("sensevoice") {
-            return try await SenseVoiceModel.fromPretrained(repo)
-        }
-        if lower.contains("granite") {
-            return try await GraniteSpeechModel.fromPretrained(repo)
-        }
-
-        throw NSError(
-            domain: "STT",
-            code: 5,
-            userInfo: [
-                NSLocalizedDescriptionKey: "Unsupported STT model repo: \(repo)"
-            ]
-        )
+        try await STT.loadModel(modelRepo: repo)
     }
 
     func play() {

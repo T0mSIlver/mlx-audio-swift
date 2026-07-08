@@ -1,5 +1,6 @@
 import SwiftUI
 import UniformTypeIdentifiers
+import Foundation
 
 struct STTView: View {
     @Environment(\.scenePhase) private var scenePhase
@@ -38,11 +39,7 @@ struct STTView: View {
                     } else if viewModel.transcriptionText.isEmpty && viewModel.isRecording {
                         RecordingTranscriptPlaceholder(supportsRealtime: viewModel.supportsRealtimeRecording)
                     } else {
-                        Text(viewModel.transcriptionText)
-                            .font(bodyFont)
-                            .textSelection(.enabled)
-                            .frame(maxWidth: .infinity, alignment: .leading)
-                            .padding()
+                        TranscriptOutputView(text: viewModel.transcriptionText, font: bodyFont)
 
                         Color.clear
                             .frame(height: 1)
@@ -384,6 +381,177 @@ struct STTView: View {
 
     private var canTranscribe: Bool {
         viewModel.selectedAudioURL != nil && !viewModel.isGenerating && viewModel.isModelLoaded
+    }
+}
+
+// MARK: - Transcript Output
+
+private struct TranscriptOutputView: View {
+    let text: String
+    let font: Font
+
+    private var segments: [TaggedTranscriptSegment] {
+        TaggedTranscriptParser.parse(text)
+    }
+
+    var body: some View {
+        if segments.isEmpty {
+            Text(text)
+                .font(font)
+                .textSelection(.enabled)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .padding()
+        } else {
+            LazyVStack(alignment: .leading, spacing: 8) {
+                ForEach(segments) { segment in
+                    TaggedTranscriptSegmentRow(segment: segment, font: font)
+                }
+            }
+            .padding()
+            .textSelection(.enabled)
+        }
+    }
+}
+
+private struct TaggedTranscriptSegmentRow: View {
+    let segment: TaggedTranscriptSegment
+    let font: Font
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            HStack(spacing: 8) {
+                Text(segment.speaker)
+                    .font(.caption.monospaced().weight(.semibold))
+                    .foregroundStyle(speakerColor)
+                    .padding(.horizontal, 8)
+                    .padding(.vertical, 4)
+                    .background(speakerColor.opacity(0.14))
+                    .clipShape(RoundedRectangle(cornerRadius: 6, style: .continuous))
+
+                Text(segment.formattedTimeRange)
+                    .font(.caption.monospacedDigit())
+                    .foregroundStyle(.secondary)
+
+                Spacer(minLength: 0)
+            }
+
+            Text(segment.text)
+                .font(font)
+                .foregroundStyle(.primary)
+                .fixedSize(horizontal: false, vertical: true)
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .padding(.horizontal, 10)
+        .padding(.vertical, 8)
+        .background(
+            RoundedRectangle(cornerRadius: 8, style: .continuous)
+                .fill(Color.primary.opacity(0.035))
+        )
+        .overlay {
+            RoundedRectangle(cornerRadius: 8, style: .continuous)
+                .stroke(speakerColor.opacity(0.14), lineWidth: 1)
+        }
+    }
+
+    private var speakerColor: Color {
+        let palette: [Color] = [
+            .blue,
+            .green,
+            .orange,
+            .purple,
+            .pink,
+            .teal,
+        ]
+        let number = Int(segment.speaker.drop { !$0.isNumber }) ?? 1
+        return palette[(max(number, 1) - 1) % palette.count]
+    }
+}
+
+private struct TaggedTranscriptSegment: Identifiable {
+    let id: Int
+    let speaker: String
+    let startTime: String
+    let endTime: String?
+    let text: String
+
+    var formattedTimeRange: String {
+        if let endTime {
+            return "\(Self.formatTimestamp(startTime)) - \(Self.formatTimestamp(endTime))"
+        }
+        return Self.formatTimestamp(startTime)
+    }
+
+    private static func formatTimestamp(_ rawValue: String) -> String {
+        guard let totalSeconds = Double(rawValue) else { return rawValue }
+
+        let minutes = Int(totalSeconds) / 60
+        let seconds = totalSeconds - Double(minutes * 60)
+        return String(format: "%d:%05.2f", minutes, seconds)
+    }
+}
+
+private enum TaggedTranscriptParser {
+    private static let startTagRegex = try! NSRegularExpression(
+        pattern: #"\[(\d+(?:\.\d+)?)\]\[(S\d{1,3})\]"#,
+        options: [.caseInsensitive]
+    )
+    private static let trailingTimestampRegex = try! NSRegularExpression(
+        pattern: #"\[(\d+(?:\.\d+)?)\]\s*$"#,
+        options: []
+    )
+
+    static func parse(_ text: String) -> [TaggedTranscriptSegment] {
+        let fullRange = NSRange(text.startIndex..<text.endIndex, in: text)
+        let matches = startTagRegex.matches(in: text, range: fullRange)
+        guard !matches.isEmpty else { return [] }
+
+        return matches.enumerated().compactMap { index, match in
+            guard
+                let matchRange = Range(match.range, in: text),
+                let startRange = Range(match.range(at: 1), in: text),
+                let speakerRange = Range(match.range(at: 2), in: text)
+            else {
+                return nil
+            }
+
+            let bodyEnd: String.Index
+            if index + 1 < matches.count,
+               let nextRange = Range(matches[index + 1].range, in: text) {
+                bodyEnd = nextRange.lowerBound
+            } else {
+                bodyEnd = text.endIndex
+            }
+
+            var segmentText = String(text[matchRange.upperBound..<bodyEnd])
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+            let endTime = stripTrailingTimestamp(from: &segmentText)
+
+            guard !segmentText.isEmpty else { return nil }
+
+            return TaggedTranscriptSegment(
+                id: index,
+                speaker: String(text[speakerRange]).uppercased(),
+                startTime: String(text[startRange]),
+                endTime: endTime,
+                text: segmentText
+            )
+        }
+    }
+
+    private static func stripTrailingTimestamp(from text: inout String) -> String? {
+        let range = NSRange(text.startIndex..<text.endIndex, in: text)
+        guard
+            let match = trailingTimestampRegex.firstMatch(in: text, range: range),
+            let timestampRange = Range(match.range(at: 1), in: text),
+            let fullMatchRange = Range(match.range, in: text)
+        else {
+            return nil
+        }
+
+        let timestamp = String(text[timestampRange])
+        text.removeSubrange(fullMatchRange)
+        text = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        return timestamp
     }
 }
 
