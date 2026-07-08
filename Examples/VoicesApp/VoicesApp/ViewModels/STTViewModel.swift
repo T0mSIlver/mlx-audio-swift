@@ -52,7 +52,6 @@ class STTViewModel {
     var audioLevel: Float { recorder.audioLevel }
 
     private var model: (any STTGenerationModel)?
-    private var streamingModel: Qwen3ASRModel?
     private let audioPlayer = AudioPlayer()
     private let recorder = AudioRecorderManager()
     private var cancellables = Set<AnyCancellable>()
@@ -63,7 +62,15 @@ class STTViewModel {
     }
 
     var canRecord: Bool {
-        streamingModel != nil
+        isRecording || (supportsRealtimeRecording && !isLoading && !isGenerating)
+    }
+
+    var supportsRealtimeRecording: Bool {
+        model is Qwen3ASRModel || model is CohereTranscribeModel
+    }
+
+    var usesRealtimeRecording: Bool {
+        isRecording && streamingSession != nil
     }
 
     init() {
@@ -103,7 +110,6 @@ class STTViewModel {
         do {
             let loadedModel = try await loadSTTModel(modelId)
             model = loadedModel
-            streamingModel = loadedModel as? Qwen3ASRModel
             loadedModelId = modelId
             generationProgress = ""
         } catch {
@@ -116,7 +122,6 @@ class STTViewModel {
 
     func reloadModel() async {
         model = nil
-        streamingModel = nil
         loadedModelId = nil
         Memory.clearCache()
         await loadModel()
@@ -169,43 +174,7 @@ class STTViewModel {
                 generationProgress = "Resampling \(sampleRate)Hz → 16000Hz..."
             }
 
-            generationProgress = "Transcribing..."
-
-            let defaultParameters = model.defaultGenerationParameters
-            let parameters = STTGenerateParameters(
-                maxTokens: maxTokens,
-                temperature: temperature,
-                topP: defaultParameters.topP,
-                topK: defaultParameters.topK,
-                verbose: false,
-                language: language.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? nil : language,
-                chunkDuration: chunkDuration,
-                minChunkDuration: defaultParameters.minChunkDuration,
-                repetitionPenalty: defaultParameters.repetitionPenalty,
-                repetitionContextSize: defaultParameters.repetitionContextSize
-            )
-
-            var tokenCount = 0
-            for try await event in model.generateStream(audio: audioData, generationParameters: parameters) {
-                try Task.checkCancellation()
-
-                switch event {
-                case .token(let token):
-                    transcriptionText += token
-                    tokenCount += 1
-                    generationProgress = "Transcribing... \(tokenCount) tokens"
-                case .info(let info):
-                    tokensPerSecond = info.tokensPerSecond
-                    peakMemory = info.peakMemoryUsage
-                case .result(let output):
-                    if transcriptionText.isEmpty {
-                        transcriptionText = output.text
-                    }
-                    tokensPerSecond = output.generationTps
-                    peakMemory = output.peakMemoryUsage
-                    generationProgress = ""
-                }
-            }
+            try await transcribe(audioData: audioData, with: model)
 
             generationProgress = ""
         } catch is CancellationError {
@@ -219,19 +188,99 @@ class STTViewModel {
         isGenerating = false
     }
 
+    private func transcribeRecording(audioData: MLXArray, clearExistingText: Bool = true) async {
+        guard let model = model else {
+            errorMessage = "Model not loaded"
+            return
+        }
+
+        isGenerating = true
+        errorMessage = nil
+        if clearExistingText {
+            transcriptionText = ""
+        }
+        generationProgress = "Transcribing recording..."
+        tokensPerSecond = 0
+        peakMemory = 0
+
+        do {
+            try await transcribe(audioData: audioData, with: model)
+            generationProgress = ""
+        } catch is CancellationError {
+            Memory.clearCache()
+            generationProgress = ""
+        } catch {
+            errorMessage = "Transcription failed: \(error.localizedDescription)"
+            generationProgress = ""
+        }
+
+        isGenerating = false
+    }
+
+    private func transcribe(audioData: MLXArray, with model: any STTGenerationModel) async throws {
+        generationProgress = "Transcribing..."
+
+        let parameters = generationParameters(for: model)
+
+        var tokenCount = 0
+        for try await event in model.generateStream(audio: audioData, generationParameters: parameters) {
+            try Task.checkCancellation()
+
+            switch event {
+            case .token(let token):
+                transcriptionText += token
+                tokenCount += 1
+                generationProgress = "Transcribing... \(tokenCount) tokens"
+            case .info(let info):
+                tokensPerSecond = info.tokensPerSecond
+                peakMemory = info.peakMemoryUsage
+            case .result(let output):
+                if transcriptionText.isEmpty {
+                    transcriptionText = output.text
+                }
+                tokensPerSecond = output.generationTps
+                peakMemory = output.peakMemoryUsage
+                generationProgress = ""
+            }
+        }
+    }
+
+    private func generationParameters(for model: any STTGenerationModel) -> STTGenerateParameters {
+        let defaultParameters = model.defaultGenerationParameters
+        return STTGenerateParameters(
+            maxTokens: maxTokens,
+            temperature: temperature,
+            topP: defaultParameters.topP,
+            topK: defaultParameters.topK,
+            verbose: false,
+            language: language.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? nil : language,
+            chunkDuration: chunkDuration,
+            minChunkDuration: defaultParameters.minChunkDuration,
+            repetitionPenalty: defaultParameters.repetitionPenalty,
+            repetitionContextSize: defaultParameters.repetitionContextSize
+        )
+    }
+
     // MARK: - Live Recording & Streaming Transcription
 
     private var liveTask: Task<Void, Never>?
     private var eventTask: Task<Void, Never>?
     private var streamingSession: StreamingInferenceSession?
+    private var activeRecordingID: UUID?
     private var lastReadPos: Int = 0
 
     func startRecording() async {
-        guard let model = streamingModel else {
+        guard let model else {
             errorMessage = "Model not loaded"
             return
         }
+        guard supportsRealtimeRecording else {
+            errorMessage = "Realtime recording is available for Qwen3-ASR and Cohere Transcribe models"
+            return
+        }
 
+        let recordingID = UUID()
+        activeRecordingID = recordingID
         errorMessage = nil
         transcriptionText = ""
         tokensPerSecond = 0
@@ -260,6 +309,7 @@ class STTViewModel {
         // Listen to events from the session
         eventTask = Task {
             for await event in session.events {
+                guard activeRecordingID == recordingID else { continue }
                 switch event {
                 case .displayUpdate(let confirmed, let provisional):
                     transcriptionText = confirmed + provisional
@@ -275,8 +325,11 @@ class STTViewModel {
                 }
             }
             // Stream ended naturally — clean up
-            streamingSession = nil
-            eventTask = nil
+            if activeRecordingID == recordingID {
+                activeRecordingID = nil
+                streamingSession = nil
+                eventTask = nil
+            }
         }
 
         // Audio feed loop: read new samples every 100ms and feed to session
@@ -296,9 +349,7 @@ class STTViewModel {
         liveTask?.cancel()
         liveTask = nil
 
-        _ = recorder.stopRecording()
-
-        // Feed any remaining audio, then stop session
+        // Feed any remaining audio, then stop session.
         if let session = streamingSession {
             if let (audio, endPos) = recorder.getAudio(from: lastReadPos) {
                 lastReadPos = endPos
@@ -306,10 +357,16 @@ class STTViewModel {
                 session.feedAudio(samples: samples)
             }
 
+            _ = recorder.stopRecording()
+
             // Stop promotes all provisional tokens and emits .ended
             // The eventTask will process .ended and clean up naturally
             session.stop()
+            return
         }
+
+        _ = recorder.stopRecording()
+        activeRecordingID = nil
     }
 
     func cancelRecording() {
@@ -320,6 +377,7 @@ class STTViewModel {
         eventTask?.cancel()
         eventTask = nil
         recorder.cancelRecording()
+        activeRecordingID = nil
         lastReadPos = 0
     }
 
@@ -332,6 +390,7 @@ class STTViewModel {
         eventTask = nil
         generationTask?.cancel()
         generationTask = nil
+        activeRecordingID = nil
 
         if isRecording {
             recorder.cancelRecording()

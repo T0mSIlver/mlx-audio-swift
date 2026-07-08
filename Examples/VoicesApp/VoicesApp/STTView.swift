@@ -35,6 +35,8 @@ struct STTView: View {
                             Spacer()
                         }
                         .frame(maxWidth: .infinity, maxHeight: .infinity)
+                    } else if viewModel.transcriptionText.isEmpty && viewModel.isRecording {
+                        RecordingTranscriptPlaceholder(supportsRealtime: viewModel.supportsRealtimeRecording)
                     } else {
                         Text(viewModel.transcriptionText)
                             .font(bodyFont)
@@ -59,7 +61,9 @@ struct STTView: View {
             if viewModel.isRecording {
                 RecordingIndicator(
                     duration: viewModel.recordingDuration,
-                    audioLevel: viewModel.audioLevel
+                    audioLevel: viewModel.audioLevel,
+                    supportsRealtime: viewModel.supportsRealtimeRecording,
+                    isRealtime: viewModel.usesRealtimeRecording
                 )
                 .padding(.horizontal)
                 .padding(.bottom, 4)
@@ -385,38 +389,160 @@ struct STTView: View {
 
 // MARK: - Recording Indicator
 
-private struct RecordingIndicator: View {
-    let duration: TimeInterval
-    let audioLevel: Float
-
-    @State private var isPulsing = false
+private struct RecordingTranscriptPlaceholder: View {
+    let supportsRealtime: Bool
 
     var body: some View {
-        HStack(spacing: 10) {
-            // Pulsing red dot
-            Circle()
-                .fill(Color.red)
-                .frame(width: 10, height: 10)
-                .scaleEffect(isPulsing ? 1.3 : 1.0)
-                .opacity(isPulsing ? 0.7 : 1.0)
-                .animation(.easeInOut(duration: 0.8).repeatForever(autoreverses: true), value: isPulsing)
-                .onAppear { isPulsing = true }
+        VStack(spacing: 8) {
+            Spacer(minLength: 80)
 
-            // Duration
-            Text(formatDuration(duration))
-                .font(.caption)
-                .monospacedDigit()
+            Image(systemName: supportsRealtime ? "text.bubble.fill" : "waveform.circle.fill")
+                .font(.system(size: 40, weight: .medium))
+                .foregroundStyle(.tertiary)
+
+            Text(supportsRealtime ? "Listening..." : "Recording...")
+                .font(.headline)
                 .foregroundStyle(.secondary)
+
+            Text(supportsRealtime ? "Realtime prediction will appear here" : "Starting realtime preview")
+                .font(.caption)
+                .foregroundStyle(.tertiary)
 
             Spacer()
         }
-        .padding(.vertical, 6)
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .padding()
+    }
+}
+
+private struct RecordingIndicator: View {
+    let duration: TimeInterval
+    let audioLevel: Float
+    let supportsRealtime: Bool
+    let isRealtime: Bool
+
+    private let barCount = 28
+
+    var body: some View {
+        HStack(spacing: 12) {
+            ZStack {
+                Circle()
+                    .fill(Color.red.opacity(0.14))
+                    .frame(width: 34, height: 34)
+
+                Image(systemName: "mic.fill")
+                    .font(.system(size: 14, weight: .semibold))
+                    .foregroundStyle(.red)
+                    .symbolEffect(.pulse, options: .repeating, value: duration)
+            }
+
+            VStack(alignment: .leading, spacing: 2) {
+                Text(isRealtime ? "Live" : "Recording")
+                    .font(.caption.weight(.semibold))
+                    .foregroundStyle(.primary)
+                    .lineLimit(1)
+
+                Text(supportsRealtime ? "Realtime preview" : "Starting...")
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+                    .lineLimit(1)
+            }
+            .frame(minWidth: 88, alignment: .leading)
+
+            TimelineView(.animation) { timeline in
+                let phase = timeline.date.timeIntervalSinceReferenceDate * 5.8
+                let level = max(0, min(CGFloat(audioLevel), 1))
+
+                HStack(alignment: .center, spacing: 3) {
+                    ForEach(0..<barCount, id: \.self) { index in
+                        let position = CGFloat(index) / CGFloat(max(barCount - 1, 1))
+                        let ripple = abs(sin(phase + Double(index) * 0.47))
+                        let envelope = 0.35 + 0.65 * sin(position * .pi)
+                        let idleLift = 0.10 + 0.10 * CGFloat(ripple)
+                        let reactiveLift = level * CGFloat(0.35 + 0.65 * ripple) * envelope
+                        let height = 8 + (idleLift + reactiveLift) * 34
+
+                        Capsule()
+                            .fill(barGradient(at: position))
+                            .frame(width: 4, height: height)
+                            .shadow(color: Color.red.opacity(0.22 * (idleLift + reactiveLift)), radius: 6)
+                    }
+                }
+                .frame(maxWidth: .infinity)
+                .frame(height: 48)
+                .animation(.easeOut(duration: 0.12), value: audioLevel)
+            }
+
+            Spacer()
+
+            Text(formatDuration(duration))
+                .font(.caption.monospacedDigit().weight(.medium))
+                .foregroundStyle(.secondary)
+                .frame(minWidth: 42, alignment: .trailing)
+        }
+        .padding(.horizontal, 12)
+        .padding(.vertical, 8)
+        .background(
+            RoundedRectangle(cornerRadius: 18, style: .continuous)
+                .fill(Color.red.opacity(0.07))
+        )
+        .overlay {
+            RoundedRectangle(cornerRadius: 18, style: .continuous)
+                .stroke(Color.red.opacity(0.16), lineWidth: 1)
+        }
+    }
+
+    private func barGradient(at position: CGFloat) -> LinearGradient {
+        let leading = Color(red: 1.0, green: 0.23, blue: 0.30)
+        let center = Color(red: 1.0, green: 0.42, blue: 0.58)
+        let trailing = Color(red: 0.72, green: 0.33, blue: 1.0)
+        let color = position < 0.5
+            ? leading.mix(with: center, by: position * 2)
+            : center.mix(with: trailing, by: (position - 0.5) * 2)
+
+        return LinearGradient(
+            colors: [color.opacity(0.65), color, color.opacity(0.75)],
+            startPoint: .bottom,
+            endPoint: .top
+        )
     }
 
     private func formatDuration(_ duration: TimeInterval) -> String {
         let minutes = Int(duration) / 60
         let seconds = Int(duration) % 60
         return String(format: "%d:%02d", minutes, seconds)
+    }
+}
+
+private extension Color {
+    func mix(with other: Color, by amount: CGFloat) -> Color {
+        #if os(iOS)
+        let first = UIColor(self)
+        let second = UIColor(other)
+        #else
+        let first = NSColor(self)
+        let second = NSColor(other)
+        #endif
+
+        var red1: CGFloat = 0
+        var green1: CGFloat = 0
+        var blue1: CGFloat = 0
+        var alpha1: CGFloat = 0
+        var red2: CGFloat = 0
+        var green2: CGFloat = 0
+        var blue2: CGFloat = 0
+        var alpha2: CGFloat = 0
+
+        first.getRed(&red1, green: &green1, blue: &blue1, alpha: &alpha1)
+        second.getRed(&red2, green: &green2, blue: &blue2, alpha: &alpha2)
+
+        let clampedAmount = max(0, min(amount, 1))
+        return Color(
+            red: red1 + (red2 - red1) * clampedAmount,
+            green: green1 + (green2 - green1) * clampedAmount,
+            blue: blue1 + (blue2 - blue1) * clampedAmount,
+            opacity: alpha1 + (alpha2 - alpha1) * clampedAmount
+        )
     }
 }
 

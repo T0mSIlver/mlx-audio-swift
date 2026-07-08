@@ -59,6 +59,34 @@ private struct StopSnapshot: Sendable {
     let fallbackFinalText: String?
 }
 
+private struct CohereStreamingSharedState: Sendable {
+    var samples: [Float] = []
+    var totalSamplesFed: Int = 0
+    var lastDecodeTime: Date?
+    var isDecoding: Bool = false
+}
+
+private struct CohereDecodePassParams: Sendable {
+    let audio: UncheckedSendableBox<MLXArray>
+    let model: UncheckedSendableBox<CohereTranscribeModel>
+    let config: StreamingConfig
+    let confirmedTokenIds: [Int]
+    let displayPrefix: String
+    let prevProvisional: [Int]
+    let prevFirstSeen: [Date]
+    let prevAgreementCounts: [Int]
+    let minAgreementPasses: Int
+    let totalSamples: Int
+}
+
+private protocol StreamingInferenceSessionCore: AnyObject, Sendable {
+    var events: AsyncStream<TranscriptionEvent> { get }
+
+    func feedAudio(samples: [Float])
+    func stop()
+    func cancel()
+}
+
 /// Orchestrates streaming speech-to-text inference.
 ///
 /// Streaming decode runs on the current **pending** (partial) encoder window for
@@ -66,7 +94,370 @@ private struct StopSnapshot: Sendable {
 /// optionally run a one-shot decode for that completed window
 /// (`StreamingConfig.finalizeCompletedWindows`) to improve accuracy, then resets
 /// decode state for the next window.
-public class StreamingInferenceSession: @unchecked Sendable {
+public final class StreamingInferenceSession: @unchecked Sendable {
+    private let core: any StreamingInferenceSessionCore
+
+    public let events: AsyncStream<TranscriptionEvent>
+
+    private init(core: any StreamingInferenceSessionCore) {
+        self.core = core
+        self.events = core.events
+    }
+
+    public convenience init(model: Qwen3ASRModel, config: StreamingConfig = StreamingConfig()) {
+        self.init(core: QwenStreamingInferenceSessionCore(model: model, config: config))
+    }
+
+    public convenience init(model: any STTGenerationModel, config: StreamingConfig = StreamingConfig()) {
+        if let qwenModel = model as? Qwen3ASRModel {
+            self.init(model: qwenModel, config: config)
+        } else if let cohereModel = model as? CohereTranscribeModel {
+            self.init(core: CohereStreamingInferenceSessionCore(model: cohereModel, config: config))
+        } else {
+            preconditionFailure("StreamingInferenceSession requires Qwen3ASRModel or CohereTranscribeModel")
+        }
+    }
+
+    public func feedAudio(samples: [Float]) {
+        core.feedAudio(samples: samples)
+    }
+
+    public func stop() {
+        core.stop()
+    }
+
+    public func cancel() {
+        core.cancel()
+    }
+}
+
+private final class CohereStreamingInferenceSessionCore: @unchecked Sendable, StreamingInferenceSessionCore {
+    private let model: CohereTranscribeModel
+    private let config: StreamingConfig
+    private let shared = OSAllocatedUnfairLock(initialState: SessionSharedState())
+    private let audioState = OSAllocatedUnfairLock(initialState: CohereStreamingSharedState())
+    private let sessionLock = OSAllocatedUnfairLock(initialState: 0)
+
+    private var isActive: Bool = false
+    private var continuation: AsyncStream<TranscriptionEvent>.Continuation?
+    private var decodeTask: Task<Void, Never>?
+    private var stopTask: Task<Void, Never>?
+
+    let events: AsyncStream<TranscriptionEvent>
+
+    init(model: CohereTranscribeModel, config: StreamingConfig = StreamingConfig()) {
+        self.model = model
+        self.config = config
+
+        var continuation: AsyncStream<TranscriptionEvent>.Continuation!
+        self.events = AsyncStream { continuation = $0 }
+        self.continuation = continuation
+        self.isActive = true
+    }
+
+    func feedAudio(samples: [Float]) {
+        let decodeSnapshot: ([Float], Int)? = sessionLock.withLock { _ in
+            guard isActive else { return nil }
+
+            let now = Date()
+            audioState.withLock { state in
+                state.samples.append(contentsOf: samples)
+                state.totalSamplesFed += samples.count
+            }
+
+            let shouldDecode = audioState.withLock { state -> Bool in
+                guard state.totalSamplesFed >= 8_000 else { return false }
+                guard !state.isDecoding else { return false }
+                if let lastDecode = state.lastDecodeTime,
+                   now.timeIntervalSince(lastDecode) < max(0.2, config.decodeIntervalSeconds)
+                {
+                    return false
+                }
+
+                state.isDecoding = true
+                state.lastDecodeTime = now
+                return true
+            }
+
+            guard shouldDecode else { return nil }
+            return audioState.withLock { state in
+                (state.samples, state.totalSamplesFed)
+            }
+        }
+
+        if let decodeSnapshot {
+            launchDecodePassLocked(samples: decodeSnapshot.0, totalSamples: decodeSnapshot.1)
+        }
+    }
+
+    private func launchDecodePassLocked(samples: [Float], totalSamples: Int) {
+        let snapshot = shared.withLock { state -> ([Int], String, [Int], [Date], [Int]) in
+            let prefix = QwenStreamingInferenceSessionCore.concatText(state.completedText, state.confirmedText)
+            return (state.confirmedTokenIds,
+                    prefix,
+                    state.provisionalTokenIds,
+                    state.provisionalFirstSeen,
+                    state.provisionalAgreementCounts)
+        }
+        let (confirmedTokenIds, displayPrefix, prevProvisional, prevFirstSeen, prevAgreementCounts) = snapshot
+        let params = CohereDecodePassParams(
+            audio: UncheckedSendableBox(MLXArray(samples)),
+            model: UncheckedSendableBox(model),
+            config: config,
+            confirmedTokenIds: confirmedTokenIds,
+            displayPrefix: displayPrefix,
+            prevProvisional: prevProvisional,
+            prevFirstSeen: prevFirstSeen,
+            prevAgreementCounts: prevAgreementCounts,
+            minAgreementPasses: max(1, config.minAgreementPasses),
+            totalSamples: totalSamples
+        )
+        let continuation = self.continuation
+        let sharedState = self.shared
+        let audioState = self.audioState
+
+        decodeTask = Task.detached {
+            defer {
+                sharedState.withLock { $0.isDecoding = false }
+                audioState.withLock { $0.isDecoding = false }
+            }
+
+            Self.runDecodePass(
+                params: params,
+                continuation: continuation,
+                sharedState: sharedState
+            )
+        }
+    }
+
+    private static func runDecodePass(
+        params: CohereDecodePassParams,
+        continuation: AsyncStream<TranscriptionEvent>.Continuation?,
+        sharedState: OSAllocatedUnfairLock<SessionSharedState>
+    ) {
+        if Task.isCancelled { return }
+
+        let result = params.model.value.streamingDecodeTokenIds(
+            audio: params.audio.value,
+            config: params.config
+        )
+
+        if Task.isCancelled { return }
+
+        promoteTokens(
+            allTokenIds: result.tokenIds,
+            params: params,
+            continuation: continuation,
+            sharedState: sharedState
+        )
+
+        let totalAudioSeconds = Double(params.totalSamples) / 16_000.0
+        let tokenCount = max(0, result.tokenIds.count - params.confirmedTokenIds.count)
+        continuation?.yield(.stats(StreamingStats(
+            encodedWindowCount: max(1, Int(ceil(totalAudioSeconds / 8.0))),
+            totalAudioSeconds: totalAudioSeconds,
+            tokensPerSecond: result.decodeTime > 0 ? Double(tokenCount) / result.decodeTime : 0,
+            realTimeFactor: result.totalTime / max(totalAudioSeconds, 0.001),
+            peakMemoryGB: result.peakMemoryUsage
+        )))
+    }
+
+    private static func promoteTokens(
+        allTokenIds: [Int],
+        params: CohereDecodePassParams,
+        continuation: AsyncStream<TranscriptionEvent>.Continuation?,
+        sharedState: OSAllocatedUnfairLock<SessionSharedState>
+    ) {
+        let confirmedCount = params.confirmedTokenIds.count
+        let prevProvisional = params.prevProvisional
+        let prevFirstSeen = params.prevFirstSeen
+        let prevAgreementCounts = params.prevAgreementCounts
+
+        let newProvisional = Array(allTokenIds.dropFirst(min(confirmedCount, allTokenIds.count)))
+        let now = Date()
+        let delaySeconds = Double(params.config.delayPreset.delayMs) / 1000.0
+
+        var matchLen = 0
+        let compareLen = min(prevProvisional.count, newProvisional.count)
+        for i in 0..<compareLen {
+            if prevProvisional[i] == newProvisional[i] {
+                matchLen = i + 1
+            } else {
+                break
+            }
+        }
+
+        var nextFirstSeen: [Date] = []
+        nextFirstSeen.reserveCapacity(newProvisional.count)
+        var nextAgreementCounts: [Int] = []
+        nextAgreementCounts.reserveCapacity(newProvisional.count)
+
+        for i in 0..<newProvisional.count {
+            if i < matchLen {
+                let firstSeen = i < prevFirstSeen.count ? prevFirstSeen[i] : now
+                let prevAgreement = i < prevAgreementCounts.count ? prevAgreementCounts[i] : 1
+                nextFirstSeen.append(firstSeen)
+                nextAgreementCounts.append(max(1, prevAgreement + 1))
+            } else {
+                nextFirstSeen.append(now)
+                nextAgreementCounts.append(1)
+            }
+        }
+
+        var promotionCount = 0
+        for i in 0..<newProvisional.count {
+            let hasDelay = i < nextFirstSeen.count && now.timeIntervalSince(nextFirstSeen[i]) >= delaySeconds
+            let hasAgreement = i < nextAgreementCounts.count && nextAgreementCounts[i] >= params.minAgreementPasses
+            if hasDelay && hasAgreement {
+                promotionCount = i + 1
+            } else {
+                break
+            }
+        }
+
+        let promoteCount = promotionCount
+        let finalProvisional = Array(newProvisional.dropFirst(promoteCount))
+        let finalFirstSeen = Array(nextFirstSeen.dropFirst(promoteCount))
+        let finalAgreementCounts = Array(nextAgreementCounts.dropFirst(promoteCount))
+
+        let displayPrefix: String = sharedState.withLock { state in
+            if promoteCount > 0 {
+                let promoted = Array(newProvisional.prefix(promoteCount))
+                state.confirmedTokenIds.append(contentsOf: promoted)
+                state.confirmedText = params.model.value.streamingDecodeText(tokens: state.confirmedTokenIds)
+                continuation?.yield(.confirmed(text: QwenStreamingInferenceSessionCore.concatText(
+                    state.completedText,
+                    state.confirmedText
+                )))
+            }
+            state.provisionalTokenIds = finalProvisional
+            state.provisionalFirstSeen = finalFirstSeen
+            state.provisionalAgreementCounts = finalAgreementCounts
+            return QwenStreamingInferenceSessionCore.concatText(state.completedText, state.confirmedText)
+        }
+
+        let finalProvText = params.model.value.streamingDecodeText(tokens: finalProvisional)
+        continuation?.yield(.displayUpdate(
+            confirmedText: displayPrefix,
+            provisionalText: finalProvText
+        ))
+    }
+
+    func stop() {
+        let stopContext: (previousStopTask: Task<Void, Never>?, inFlightDecode: Task<Void, Never>?, snapshot: ([Float], Int, String)?)? =
+            sessionLock.withLock { _ in
+                guard isActive else { return nil }
+                isActive = false
+
+                let inFlightDecode = decodeTask
+                decodeTask = nil
+
+                let snapshot = audioState.withLock { state in
+                    let latestText = shared.withLock {
+                        QwenStreamingInferenceSessionCore.concatText($0.completedText, $0.confirmedText)
+                    }
+                    return (state.samples, state.totalSamplesFed, latestText)
+                }
+
+                let previousStopTask = stopTask
+                stopTask = nil
+                return (previousStopTask, inFlightDecode, snapshot)
+            }
+
+        guard let stopContext else { return }
+        stopContext.previousStopTask?.cancel()
+
+        let task = Task.detached { [self, inFlightDecode = stopContext.inFlightDecode, snapshot = stopContext.snapshot] in
+            await finishStop(waitingFor: inFlightDecode, snapshot: snapshot)
+        }
+
+        sessionLock.withLock { _ in
+            if continuation != nil {
+                stopTask = task
+            }
+        }
+    }
+
+    private func finishStop(
+        waitingFor inFlightDecode: Task<Void, Never>?,
+        snapshot: ([Float], Int, String)?
+    ) async {
+        if let inFlightDecode {
+            _ = await inFlightDecode.value
+        }
+
+        if Task.isCancelled {
+            return
+        }
+
+        if let snapshot, !snapshot.0.isEmpty {
+            let params = CohereDecodePassParams(
+                audio: UncheckedSendableBox(MLXArray(snapshot.0)),
+                model: UncheckedSendableBox(model),
+                config: config,
+                confirmedTokenIds: [],
+                displayPrefix: "",
+                prevProvisional: [],
+                prevFirstSeen: [],
+                prevAgreementCounts: [],
+                minAgreementPasses: 1,
+                totalSamples: snapshot.1
+            )
+            Self.runDecodePass(
+                params: params,
+                continuation: continuation,
+                sharedState: shared
+            )
+        }
+
+        let finalText = shared.withLock { state -> String in
+            if !state.provisionalTokenIds.isEmpty {
+                state.confirmedTokenIds.append(contentsOf: state.provisionalTokenIds)
+                state.provisionalTokenIds = []
+                state.provisionalFirstSeen = []
+                state.provisionalAgreementCounts = []
+            }
+            state.confirmedText = model.streamingDecodeText(tokens: state.confirmedTokenIds)
+            return QwenStreamingInferenceSessionCore.concatText(state.completedText, state.confirmedText)
+        }
+
+        if Task.isCancelled {
+            return
+        }
+
+        continuation?.yield(.ended(fullText: finalText))
+        continuation?.finish()
+
+        sessionLock.withLock { _ in
+            continuation = nil
+            stopTask = nil
+            audioState.withLock { state in
+                state.samples = []
+                state.isDecoding = false
+            }
+        }
+
+        Memory.clearCache()
+    }
+
+    func cancel() {
+        sessionLock.withLock { _ in
+            isActive = false
+            decodeTask?.cancel()
+            decodeTask = nil
+            stopTask?.cancel()
+            stopTask = nil
+            continuation?.finish()
+            continuation = nil
+            audioState.withLock { state in
+                state.samples = []
+                state.isDecoding = false
+            }
+        }
+    }
+}
+
+private final class QwenStreamingInferenceSessionCore: @unchecked Sendable, StreamingInferenceSessionCore {
     private let model: Qwen3ASRModel
     private let config: StreamingConfig
     private let melProcessor: IncrementalMelSpectrogram
@@ -87,9 +478,9 @@ public class StreamingInferenceSession: @unchecked Sendable {
     private var decodeTask: Task<Void, Never>?
     private var stopTask: Task<Void, Never>?
 
-    public let events: AsyncStream<TranscriptionEvent>
+    let events: AsyncStream<TranscriptionEvent>
 
-    public init(model: Qwen3ASRModel, config: StreamingConfig = StreamingConfig()) {
+    init(model: Qwen3ASRModel, config: StreamingConfig = StreamingConfig()) {
         self.model = model
         self.config = config
         let overlapFrames = max(0, Int(round(config.encoderWindowOverlapSeconds * Double(model.sampleRate) / 160.0)))
@@ -111,7 +502,7 @@ public class StreamingInferenceSession: @unchecked Sendable {
         self.isActive = true
     }
 
-    public func feedAudio(samples: [Float]) {
+    func feedAudio(samples: [Float]) {
         sessionLock.withLock { _ in
             guard isActive else { return }
 
@@ -441,7 +832,7 @@ public class StreamingInferenceSession: @unchecked Sendable {
         return remainder.joined(separator: " ")
     }
 
-    private static func concatText(_ a: String, _ b: String) -> String {
+    fileprivate static func concatText(_ a: String, _ b: String) -> String {
         var result = a
         appendText(b, to: &result)
         return result
