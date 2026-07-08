@@ -135,6 +135,7 @@ for try await event in model.generateStream(text: text, parameters: parameters) 
 |-------|--------------|------------------|
 | Qwen3-ASR | [Qwen3-ASR README](Sources/MLXAudioSTT/Models/Qwen3ASR/README.md) | [mlx-community/Qwen3-ASR-1.7B-bf16](https://huggingface.co/mlx-community/Qwen3-ASR-1.7B-bf16) |
 | Qwen3-ForcedAligner | [Qwen3-ASR README](Sources/MLXAudioSTT/Models/Qwen3ASR/README.md) | [mlx-community/Qwen3-ForcedAligner-0.6B-bf16](https://huggingface.co/mlx-community/Qwen3-ForcedAligner-0.6B-bf16) |
+| MOSS-Transcribe-Diarize | [MOSS-Transcribe-Diarize README](Sources/MLXAudioSTT/Models/MossTranscribeDiarize/README.md) | [OpenMOSS-Team/MOSS-Transcribe-Diarize](https://huggingface.co/OpenMOSS-Team/MOSS-Transcribe-Diarize) |
 | Voxtral Realtime | [Voxtral README](Sources/MLXAudioSTT/Models/VoxtralRealtime/README.md) | [mlx-community/Voxtral-Mini-4B-Realtime-2602-fp16](https://huggingface.co/mlx-community/Voxtral-Mini-4B-Realtime-2602-fp16) |
 | Cohere Transcribe | [Cohere Transcribe README](Sources/MLXAudioSTT/Models/CohereTranscribe/README.md) | [beshkenadze/cohere-transcribe-03-2026-mlx-fp16](https://huggingface.co/beshkenadze/cohere-transcribe-03-2026-mlx-fp16) |
 | Parakeet | [Parakeet README](Sources/MLXAudioSTT/Models/Parakeet/README.md) | [mlx-community/parakeet-tdt-0.6b-v3](https://huggingface.co/mlx-community/parakeet-tdt-0.6b-v3) |

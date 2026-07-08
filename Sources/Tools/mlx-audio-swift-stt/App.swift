@@ -456,6 +456,9 @@ enum App {
         if lower.contains("qwen3-asr") || lower.contains("qwen3_asr") {
             return .stt(try await Qwen3ASRModel.fromPretrained(repo))
         }
+        if lower.contains("moss_transcribe_diarize") {
+            return .stt(try await MossTranscribeDiarizeModel.fromPretrained(repo))
+        }
         if lower.contains("voxtral") {
             return .stt(try await VoxtralRealtimeModel.fromPretrained(repo))
         }
