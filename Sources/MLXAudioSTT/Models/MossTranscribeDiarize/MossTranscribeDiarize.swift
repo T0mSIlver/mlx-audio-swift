@@ -256,6 +256,8 @@ public final class MossTranscribeDiarizeModel: Module, STTGenerationModel {
             audio: audio,
             maxTokens: generationParameters.maxTokens,
             temperature: generationParameters.temperature,
+            chunkDuration: generationParameters.chunkDuration,
+            minChunkDuration: generationParameters.minChunkDuration,
             repetitionPenalty: generationParameters.repetitionPenalty,
             repetitionContextSize: generationParameters.repetitionContextSize
         )
@@ -273,44 +275,51 @@ public final class MossTranscribeDiarizeModel: Module, STTGenerationModel {
                 let audio = sendableAudio.value
                 do {
                     let start = Date()
-                    let prepared = try model.prepareGenerationInputs(audio: audio, prompt: nil)
-                    var generatedTokens: [Int] = []
-                    var streamedText = ""
-                    for token in try model.generateTokenIds(
-                        promptIds: prepared.promptIds,
-                        inputEmbeddings: prepared.inputEmbeddings,
-                        maxTokens: generationParameters.maxTokens,
-                        temperature: generationParameters.temperature,
-                        repetitionPenalty: generationParameters.repetitionPenalty,
-                        repetitionContextSize: generationParameters.repetitionContextSize
-                    ) {
-                        generatedTokens.append(token)
-                        let text = model.tokenizer?.decode(tokens: [token], skipSpecialTokens: true) ?? ""
-                        streamedText += text
-                        continuation.yield(.token(text))
+                    let chunks = model.audioChunks(
+                        audio,
+                        chunkDuration: generationParameters.chunkDuration,
+                        minChunkDuration: generationParameters.minChunkDuration
+                    )
+                    var outputs: [STTOutput] = []
+                    outputs.reserveCapacity(chunks.count)
+                    var emittedText = false
+
+                    for (chunkAudio, offsetSeconds) in chunks {
+                        try Task.checkCancellation()
+
+                        // MOSS emits verbose timestamped diarization text, so the UI's
+                        // maxTokens setting is a per-chunk decode cap for long audio.
+                        let output = try model.generateSingleChunk(
+                            audio: chunkAudio,
+                            maxTokens: generationParameters.maxTokens,
+                            temperature: generationParameters.temperature,
+                            repetitionPenalty: generationParameters.repetitionPenalty,
+                            repetitionContextSize: generationParameters.repetitionContextSize,
+                            prompt: nil,
+                            offsetSeconds: Double(offsetSeconds)
+                        )
+                        outputs.append(output)
+
+                        let text = output.text.trimmingCharacters(in: .whitespacesAndNewlines)
+                        if !text.isEmpty {
+                            continuation.yield(.token(emittedText ? "\n" + text : text))
+                            emittedText = true
+                        }
+
+                        Memory.clearCache()
                     }
+
                     let totalTime = Date().timeIntervalSince(start)
+                    let combined = Self.combineChunkOutputs(outputs, totalTime: totalTime)
                     continuation.yield(.info(STTGenerationInfo(
-                        promptTokenCount: prepared.promptTokenCount,
-                        generationTokenCount: generatedTokens.count,
+                        promptTokenCount: combined.promptTokens,
+                        generationTokenCount: combined.generationTokens,
                         prefillTime: 0,
                         generateTime: totalTime,
-                        tokensPerSecond: totalTime > 0 ? Double(generatedTokens.count) / totalTime : 0,
-                        peakMemoryUsage: Double(Memory.peakMemory) / 1e9
+                        tokensPerSecond: combined.generationTps,
+                        peakMemoryUsage: combined.peakMemoryUsage
                     )))
-                    continuation.yield(.result(STTOutput(
-                        text: streamedText.trimmingCharacters(in: .whitespacesAndNewlines),
-                        segments: MossTranscribeDiarizeModel.parseSegments(
-                            text: streamedText,
-                            fallbackEnd: prepared.duration
-                        ),
-                        promptTokens: prepared.promptTokenCount,
-                        generationTokens: generatedTokens.count,
-                        totalTokens: prepared.promptTokenCount + generatedTokens.count,
-                        generationTps: totalTime > 0 ? Double(generatedTokens.count) / totalTime : 0,
-                        totalTime: totalTime,
-                        peakMemoryUsage: Double(Memory.peakMemory) / 1e9
-                    )))
+                    continuation.yield(.result(combined))
                     continuation.finish()
                 } catch is CancellationError {
                     continuation.finish()
@@ -326,40 +335,39 @@ public final class MossTranscribeDiarizeModel: Module, STTGenerationModel {
         audio: MLXArray,
         maxTokens: Int = 2048,
         temperature: Float = 0.0,
+        chunkDuration: Float = 1800.0,
+        minChunkDuration: Float = 0.0,
         repetitionPenalty: Float = 1.0,
         repetitionContextSize: Int = 100,
         prompt: String? = nil
     ) -> STTOutput {
         let start = Date()
         do {
-            let prefillStart = Date()
-            let prepared = try prepareGenerationInputs(audio: audio, prompt: prompt)
-            let prefillTime = Date().timeIntervalSince(prefillStart)
-            let genStart = Date()
-            let generatedTokens = try generateTokenIds(
-                promptIds: prepared.promptIds,
-                inputEmbeddings: prepared.inputEmbeddings,
-                maxTokens: maxTokens,
-                temperature: temperature,
-                repetitionPenalty: repetitionPenalty,
-                repetitionContextSize: repetitionContextSize
+            let chunks = audioChunks(
+                audio,
+                chunkDuration: chunkDuration,
+                minChunkDuration: minChunkDuration
             )
-            let genTime = Date().timeIntervalSince(genStart)
-            let text = tokenizer?
-                .decode(tokens: generatedTokens, skipSpecialTokens: true)
-                .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
-            let totalTime = Date().timeIntervalSince(start)
-            return STTOutput(
-                text: text,
-                segments: Self.parseSegments(text: text, fallbackEnd: prepared.duration),
-                promptTokens: prepared.promptTokenCount,
-                generationTokens: generatedTokens.count,
-                totalTokens: prepared.promptTokenCount + generatedTokens.count,
-                promptTps: prefillTime > 0 ? Double(prepared.promptTokenCount) / prefillTime : 0,
-                generationTps: genTime > 0 ? Double(generatedTokens.count) / genTime : 0,
-                totalTime: totalTime,
-                peakMemoryUsage: Double(Memory.peakMemory) / 1e9
-            )
+            var outputs: [STTOutput] = []
+            outputs.reserveCapacity(chunks.count)
+
+            for (chunkAudio, offsetSeconds) in chunks {
+                // MOSS emits verbose timestamped diarization text, so maxTokens is a
+                // per-chunk decode cap instead of a whole-file budget.
+                let output = try generateSingleChunk(
+                    audio: chunkAudio,
+                    maxTokens: maxTokens,
+                    temperature: temperature,
+                    repetitionPenalty: repetitionPenalty,
+                    repetitionContextSize: repetitionContextSize,
+                    prompt: prompt,
+                    offsetSeconds: Double(offsetSeconds)
+                )
+                outputs.append(output)
+                Memory.clearCache()
+            }
+
+            return Self.combineChunkOutputs(outputs, totalTime: Date().timeIntervalSince(start))
         } catch {
             fatalError("MOSS-Transcribe-Diarize generation failed: \(error)")
         }
@@ -525,6 +533,65 @@ private extension MossTranscribeDiarizeModel {
         )
     }
 
+    func audioChunks(
+        _ audio: MLXArray,
+        chunkDuration: Float,
+        minChunkDuration: Float
+    ) -> [(MLXArray, Float)] {
+        let safeChunkDuration = chunkDuration > 0 ? chunkDuration : defaultGenerationParameters.chunkDuration
+        return splitAudioIntoChunks(
+            audio,
+            sampleRate: sampleRate,
+            chunkDuration: safeChunkDuration,
+            minChunkDuration: max(0, minChunkDuration)
+        )
+    }
+
+    func generateSingleChunk(
+        audio: MLXArray,
+        maxTokens: Int,
+        temperature: Float,
+        repetitionPenalty: Float,
+        repetitionContextSize: Int,
+        prompt: String?,
+        offsetSeconds: Double
+    ) throws -> STTOutput {
+        let start = Date()
+        let prefillStart = Date()
+        let prepared = try prepareGenerationInputs(audio: audio, prompt: prompt)
+        let prefillTime = Date().timeIntervalSince(prefillStart)
+        let genStart = Date()
+        let generatedTokens = try generateTokenIds(
+            promptIds: prepared.promptIds,
+            inputEmbeddings: prepared.inputEmbeddings,
+            maxTokens: maxTokens,
+            temperature: temperature,
+            repetitionPenalty: repetitionPenalty,
+            repetitionContextSize: repetitionContextSize
+        )
+        let genTime = Date().timeIntervalSince(genStart)
+        let rawText = tokenizer?
+            .decode(tokens: generatedTokens, skipSpecialTokens: true)
+            .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        let text = Self.offsetTimestampTags(in: rawText, by: offsetSeconds)
+        let totalTime = Date().timeIntervalSince(start)
+        return STTOutput(
+            text: text,
+            segments: Self.parseSegments(
+                text: rawText,
+                fallbackEnd: prepared.duration,
+                offsetSeconds: offsetSeconds
+            ),
+            promptTokens: prepared.promptTokenCount,
+            generationTokens: generatedTokens.count,
+            totalTokens: prepared.promptTokenCount + generatedTokens.count,
+            promptTps: prefillTime > 0 ? Double(prepared.promptTokenCount) / prefillTime : 0,
+            generationTps: genTime > 0 ? Double(generatedTokens.count) / genTime : 0,
+            totalTime: totalTime,
+            peakMemoryUsage: Double(Memory.peakMemory) / 1e9
+        )
+    }
+
     func eosTokenIds() -> Set<Int> {
         [151643, 151645]
     }
@@ -612,10 +679,72 @@ private extension MossTranscribeDiarizeModel {
 }
 
 extension MossTranscribeDiarizeModel {
-    static func parseSegments(text: String, fallbackEnd: Double) -> [[String: Any]] {
-        let pattern = #"\[(\d+(?:\.\d+)?)\]\[(S\d+)\](.*?)\[(\d+(?:\.\d+)?)\]"#
+    static func combineChunkOutputs(_ outputs: [STTOutput], totalTime: TimeInterval) -> STTOutput {
+        let text = outputs
+            .map(\.text)
+            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+            .filter { !$0.isEmpty }
+            .joined(separator: "\n")
+        let segments = outputs.flatMap { $0.segments ?? [] }
+        let promptTokens = outputs.reduce(0) { $0 + $1.promptTokens }
+        let generationTokens = outputs.reduce(0) { $0 + $1.generationTokens }
+        let totalTokens = outputs.reduce(0) { $0 + $1.totalTokens }
+        let peakMemoryUsage = outputs.map(\.peakMemoryUsage).max() ?? 0
+
+        return STTOutput(
+            text: text,
+            segments: segments.isEmpty ? nil : segments,
+            promptTokens: promptTokens,
+            generationTokens: generationTokens,
+            totalTokens: totalTokens,
+            promptTps: totalTime > 0 ? Double(promptTokens) / totalTime : 0,
+            generationTps: totalTime > 0 ? Double(generationTokens) / totalTime : 0,
+            totalTime: totalTime,
+            peakMemoryUsage: peakMemoryUsage
+        )
+    }
+
+    static func offsetTimestampTags(in text: String, by offsetSeconds: Double) -> String {
+        guard offsetSeconds != 0 else { return text }
+        let pattern = #"\[(\d+(?:[\.,]\d+)?)\]"#
+        guard let regex = try? NSRegularExpression(pattern: pattern) else { return text }
+        let timestampLocale = Locale(identifier: "en_US_POSIX")
+
+        let nsText = text as NSString
+        let matches = regex.matches(
+            in: text,
+            options: [],
+            range: NSRange(location: 0, length: nsText.length)
+        )
+        guard !matches.isEmpty else { return text }
+
+        var output = ""
+        var cursor = text.startIndex
+        for match in matches {
+            guard
+                let fullRange = Range(match.range, in: text),
+                let valueRange = Range(match.range(at: 1), in: text),
+                let value = Self.timestampValue(String(text[valueRange]))
+            else {
+                continue
+            }
+
+            output += text[cursor..<fullRange.lowerBound]
+            output += String(format: "[%.2f]", locale: timestampLocale, value + offsetSeconds)
+            cursor = fullRange.upperBound
+        }
+        output += text[cursor..<text.endIndex]
+        return output
+    }
+
+    static func parseSegments(
+        text: String,
+        fallbackEnd: Double,
+        offsetSeconds: Double = 0
+    ) -> [[String: Any]] {
+        let pattern = #"\[(\d+(?:[\.,]\d+)?)\]\[(S\d+)\](.*?)\[(\d+(?:[\.,]\d+)?)\]"#
         guard let regex = try? NSRegularExpression(pattern: pattern, options: [.dotMatchesLineSeparators]) else {
-            return [["start": 0.0, "end": max(fallbackEnd, 0.0), "text": text]]
+            return [["start": offsetSeconds, "end": offsetSeconds + max(fallbackEnd, 0.0), "text": text]]
         }
 
         let nsText = text as NSString
@@ -627,8 +756,8 @@ extension MossTranscribeDiarizeModel {
         var segments: [[String: Any]] = []
         for match in matches {
             guard match.numberOfRanges == 5,
-                  let start = Double(nsText.substring(with: match.range(at: 1))),
-                  let end = Double(nsText.substring(with: match.range(at: 4))),
+                  let start = Self.timestampValue(nsText.substring(with: match.range(at: 1))),
+                  let end = Self.timestampValue(nsText.substring(with: match.range(at: 4))),
                   end >= start
             else {
                 continue
@@ -640,8 +769,8 @@ extension MossTranscribeDiarizeModel {
                 continue
             }
             segments.append([
-                "start": start,
-                "end": end,
+                "start": start + offsetSeconds,
+                "end": end + offsetSeconds,
                 "text": "[\(speaker)] \(segmentText)",
                 "speaker_id": speaker,
             ])
@@ -650,7 +779,11 @@ extension MossTranscribeDiarizeModel {
         if !segments.isEmpty {
             return segments
         }
-        return [["start": 0.0, "end": max(fallbackEnd, 0.0), "text": text]]
+        return [["start": offsetSeconds, "end": offsetSeconds + max(fallbackEnd, 0.0), "text": text]]
+    }
+
+    private static func timestampValue(_ text: String) -> Double? {
+        Double(text.replacingOccurrences(of: ",", with: "."))
     }
 
     static func sanitize(weights: [String: MLXArray]) -> [String: MLXArray] {

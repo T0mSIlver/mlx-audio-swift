@@ -482,21 +482,30 @@ private struct TaggedTranscriptSegment: Identifiable {
     }
 
     private static func formatTimestamp(_ rawValue: String) -> String {
-        guard let totalSeconds = Double(rawValue) else { return rawValue }
+        guard let totalSeconds = timestampValue(rawValue) else { return rawValue }
 
         let minutes = Int(totalSeconds) / 60
         let seconds = totalSeconds - Double(minutes * 60)
-        return String(format: "%d:%05.2f", minutes, seconds)
+        return String(
+            format: "%d:%05.2f",
+            locale: Locale(identifier: "en_US_POSIX"),
+            minutes,
+            seconds
+        )
+    }
+
+    private static func timestampValue(_ text: String) -> Double? {
+        Double(text.replacingOccurrences(of: ",", with: "."))
     }
 }
 
 private enum TaggedTranscriptParser {
     private static let startTagRegex = try! NSRegularExpression(
-        pattern: #"\[(\d+(?:\.\d+)?)\]\[(S\d{1,3})\]"#,
+        pattern: #"\[(\d+(?:[\.,]\d+)?)\]\[(S\d{1,3})\]"#,
         options: [.caseInsensitive]
     )
     private static let trailingTimestampRegex = try! NSRegularExpression(
-        pattern: #"\[(\d+(?:\.\d+)?)\]\s*$"#,
+        pattern: #"\[(\d+(?:[\.,]\d+)?)\]\s*$"#,
         options: []
     )
 
@@ -539,19 +548,22 @@ private enum TaggedTranscriptParser {
     }
 
     private static func stripTrailingTimestamp(from text: inout String) -> String? {
-        let range = NSRange(text.startIndex..<text.endIndex, in: text)
-        guard
-            let match = trailingTimestampRegex.firstMatch(in: text, range: range),
-            let timestampRange = Range(match.range(at: 1), in: text),
-            let fullMatchRange = Range(match.range, in: text)
-        else {
-            return nil
-        }
+        var lastTimestamp: String?
 
-        let timestamp = String(text[timestampRange])
-        text.removeSubrange(fullMatchRange)
-        text = text.trimmingCharacters(in: .whitespacesAndNewlines)
-        return timestamp
+        while true {
+            let range = NSRange(text.startIndex..<text.endIndex, in: text)
+            guard
+                let match = trailingTimestampRegex.firstMatch(in: text, range: range),
+                let timestampRange = Range(match.range(at: 1), in: text),
+                let fullMatchRange = Range(match.range, in: text)
+            else {
+                return lastTimestamp
+            }
+
+            lastTimestamp = String(text[timestampRange])
+            text.removeSubrange(fullMatchRange)
+            text = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        }
     }
 }
 

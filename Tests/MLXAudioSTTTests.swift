@@ -1935,6 +1935,41 @@ struct MossTranscribeDiarizeModuleSetupTests {
         #expect(segments[1]["speaker_id"] as? String == "S02")
     }
 
+    @Test func mossParseSegmentsAppliesChunkOffset() {
+        let text = "[0.48][S01]hello[1.66]"
+
+        let segments = MossTranscribeDiarizeModel.parseSegments(
+            text: text,
+            fallbackEnd: 10.0,
+            offsetSeconds: 30.0
+        )
+
+        #expect(segments.count == 1)
+        #expect(segments[0]["start"] as? Double == 30.48)
+        #expect(segments[0]["end"] as? Double == 31.66)
+        #expect(segments[0]["speaker_id"] as? String == "S01")
+    }
+
+    @Test func mossOffsetTimestampTags() {
+        let text = "[0.48][S01]hello[1.66][2.00][S02]world[3.50]"
+
+        let shifted = MossTranscribeDiarizeModel.offsetTimestampTags(in: text, by: 60.0)
+
+        #expect(shifted == "[60.48][S01]hello[61.66][62.00][S02]world[63.50]")
+    }
+
+    @Test func mossTimestampHelpersHandleCommaDecimals() {
+        let text = "[0,48][S01]hello[1,66]"
+
+        let shifted = MossTranscribeDiarizeModel.offsetTimestampTags(in: text, by: 30.0)
+        let segments = MossTranscribeDiarizeModel.parseSegments(text: text, fallbackEnd: 10.0, offsetSeconds: 30.0)
+
+        #expect(shifted == "[30.48][S01]hello[31.66]")
+        #expect(segments.count == 1)
+        #expect(segments[0]["start"] as? Double == 30.48)
+        #expect(segments[0]["end"] as? Double == 31.66)
+    }
+
     @Test func mossParseSegmentsFallback() {
         let text = "[S01] hello world"
 
