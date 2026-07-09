@@ -75,6 +75,11 @@ class STTViewModel {
     }
     private var loadedModelId: String?
 
+    private var languageHint: String? {
+        let trimmed = language.trimmingCharacters(in: .whitespacesAndNewlines)
+        return trimmed.isEmpty ? nil : trimmed
+    }
+
     // Audio file
     var selectedAudioURL: URL?
     var audioFileName: String?
@@ -305,7 +310,7 @@ class STTViewModel {
             topP: defaultParameters.topP,
             topK: defaultParameters.topK,
             verbose: false,
-            language: language.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? nil : language,
+            language: languageHint,
             chunkDuration: chunkDuration,
             minChunkDuration: defaultParameters.minChunkDuration,
             repetitionPenalty: defaultParameters.repetitionPenalty,
@@ -350,7 +355,7 @@ class STTViewModel {
             decodeIntervalSeconds: 1.0,
             maxCachedWindows: 60,
             delayPreset: .custom(ms: streamingDelayMs),
-            language: language,
+            language: languageHint,
             temperature: temperature,
             maxTokensPerPass: maxTokens
         )

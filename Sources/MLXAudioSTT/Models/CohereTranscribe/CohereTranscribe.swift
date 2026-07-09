@@ -760,7 +760,7 @@ extension CohereTranscribeModel {
         config: StreamingConfig,
         confirmedTokenIds: [Int] = []
     ) -> CohereStreamingDecodeResult {
-        let language = config.language.trimmingCharacters(in: .whitespacesAndNewlines)
+        let language = config.language?.trimmingCharacters(in: .whitespacesAndNewlines)
         let defaultParameters = defaultGenerationParameters
         let parameters = STTGenerateParameters(
             maxTokens: config.maxTokensPerPass,
@@ -768,7 +768,7 @@ extension CohereTranscribeModel {
             topP: defaultParameters.topP,
             topK: defaultParameters.topK,
             verbose: false,
-            language: language.isEmpty ? defaultParameters.language : language,
+            language: language?.isEmpty == false ? language : defaultParameters.language,
             chunkDuration: defaultParameters.chunkDuration,
             minChunkDuration: defaultParameters.minChunkDuration,
             repetitionPenalty: defaultParameters.repetitionPenalty,

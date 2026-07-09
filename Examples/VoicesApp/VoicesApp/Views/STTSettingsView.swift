@@ -243,7 +243,7 @@ struct STTSettingsView: View {
                     .font(labelFont)
                     .foregroundStyle(.secondary)
 
-                TextField("Language", text: $viewModel.language)
+                TextField("Auto", text: $viewModel.language)
                     .font(textFont)
                     .textFieldStyle(.plain)
                     .padding(8)
@@ -251,7 +251,7 @@ struct STTSettingsView: View {
                     .clipShape(RoundedRectangle(cornerRadius: 6))
                     .padding(.top, 4)
 
-                Text("e.g. English, Chinese, Japanese, Korean")
+                Text("Leave empty for model default/auto, or enter e.g. English, Chinese, Japanese, Korean")
                     .font(.caption2)
                     .foregroundStyle(.tertiary)
             }
