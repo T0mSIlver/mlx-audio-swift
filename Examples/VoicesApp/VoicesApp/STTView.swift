@@ -243,8 +243,8 @@ struct STTView: View {
                         }
                     }
 
-                    // Stats after generation
-                    if !viewModel.isGenerating && viewModel.tokensPerSecond > 0 {
+                    // Stats
+                    if viewModel.tokensPerSecond > 0 {
                         HStack(spacing: 8) {
                             Label(
                                 String(format: "%.1f tok/s", viewModel.tokensPerSecond),

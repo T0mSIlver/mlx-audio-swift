@@ -369,19 +369,20 @@ public final class MossTranscribeDiarizeModel: Module, STTGenerationModel {
                             emittedChunkText = true
                         }
                         outputs.append(output)
+                        let elapsed = Date().timeIntervalSince(start)
+                        continuation.yield(.info(Self.generationInfo(
+                            for: outputs,
+                            elapsedTime: elapsed
+                        )))
 
                         Memory.clearCache()
                     }
 
                     let totalTime = Date().timeIntervalSince(start)
                     let combined = Self.combineChunkOutputs(outputs, totalTime: totalTime)
-                    continuation.yield(.info(STTGenerationInfo(
-                        promptTokenCount: combined.promptTokens,
-                        generationTokenCount: combined.generationTokens,
-                        prefillTime: 0,
-                        generateTime: totalTime,
-                        tokensPerSecond: combined.generationTps,
-                        peakMemoryUsage: combined.peakMemoryUsage
+                    continuation.yield(.info(Self.generationInfo(
+                        for: outputs,
+                        elapsedTime: totalTime
                     )))
                     continuation.yield(.result(combined))
                     continuation.finish()
@@ -621,6 +622,8 @@ private extension MossTranscribeDiarizeModel {
         offsetSeconds: Double,
         onText: ((String) -> Void)? = nil
     ) throws -> STTOutput {
+        defer { Memory.clearCache() }
+
         let start = Date()
         let prefillStart = Date()
         let prepared = try prepareGenerationInputs(audio: audio, prompt: prompt)
@@ -687,6 +690,8 @@ private extension MossTranscribeDiarizeModel {
         var processedTokens = 0
 
         while totalTokens - processedTokens > 1 {
+            try Task.checkCancellation()
+
             let remaining = (totalTokens - processedTokens) - 1
             let n = min(prefillStepSize, remaining)
             let chunkIds = promptIds[0..., processedTokens..<(processedTokens + n)]
@@ -711,6 +716,8 @@ private extension MossTranscribeDiarizeModel {
         let eos = eosTokenIds()
 
         for tokenIndex in 0..<maxTokens {
+            try Task.checkCancellation()
+
             let token = nextTokenArray.item(Int.self)
             if eos.contains(token) {
                 break
@@ -797,6 +804,21 @@ extension MossTranscribeDiarizeModel {
             promptTps: totalTime > 0 ? Double(promptTokens) / totalTime : 0,
             generationTps: totalTime > 0 ? Double(generationTokens) / totalTime : 0,
             totalTime: totalTime,
+            peakMemoryUsage: peakMemoryUsage
+        )
+    }
+
+    static func generationInfo(for outputs: [STTOutput], elapsedTime: TimeInterval) -> STTGenerationInfo {
+        let promptTokens = outputs.reduce(0) { $0 + $1.promptTokens }
+        let generationTokens = outputs.reduce(0) { $0 + $1.generationTokens }
+        let peakMemoryUsage = outputs.map(\.peakMemoryUsage).max() ?? 0
+
+        return STTGenerationInfo(
+            promptTokenCount: promptTokens,
+            generationTokenCount: generationTokens,
+            prefillTime: 0,
+            generateTime: elapsedTime,
+            tokensPerSecond: elapsedTime > 0 ? Double(generationTokens) / elapsedTime : 0,
             peakMemoryUsage: peakMemoryUsage
         )
     }

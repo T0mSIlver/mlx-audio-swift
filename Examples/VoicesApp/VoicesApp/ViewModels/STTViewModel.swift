@@ -219,8 +219,7 @@ class STTViewModel {
         errorMessage = nil
         transcriptionText = ""
         generationProgress = "Loading audio..."
-        tokensPerSecond = 0
-        peakMemory = 0
+        resetGenerationStats()
 
         do {
             let (sampleRate, audioData) = try loadAudioArray(from: audioURL, sampleRate: 16_000)
@@ -254,8 +253,7 @@ class STTViewModel {
             transcriptionText = ""
         }
         generationProgress = "Transcribing recording..."
-        tokensPerSecond = 0
-        peakMemory = 0
+        resetGenerationStats()
 
         do {
             try await transcribe(audioData: audioData, with: model)
@@ -337,8 +335,7 @@ class STTViewModel {
         activeRecordingID = recordingID
         errorMessage = nil
         transcriptionText = ""
-        tokensPerSecond = 0
-        peakMemory = 0
+        resetGenerationStats()
         lastReadPos = 0
 
         do {
@@ -494,6 +491,13 @@ class STTViewModel {
         generationProgress = ""
         tokensPerSecond = 0
         peakMemory = 0
+    }
+
+    private func resetGenerationStats() {
+        tokensPerSecond = 0
+        peakMemory = 0
+        Memory.clearCache()
+        Memory.peakMemory = 0
     }
 
     private func resampleAudio(_ audio: MLXArray, from sourceSR: Int, to targetSR: Int) throws -> MLXArray {
