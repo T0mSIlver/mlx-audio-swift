@@ -191,6 +191,7 @@ private final class MossStreamingInferenceSessionCore: @unchecked Sendable, Stre
     private let config: StreamingConfig
     private let sampleRate: Int
     private let windowSamples: Int
+    private let partialWindowSamples: Int
     private let minimumPartialSamples: Int
     private let shared = OSAllocatedUnfairLock(initialState: MossStreamingSharedState())
     private let audioState = OSAllocatedUnfairLock(initialState: MossAudioStreamingSharedState())
@@ -207,9 +208,13 @@ private final class MossStreamingInferenceSessionCore: @unchecked Sendable, Stre
         self.model = model
         self.config = config
         self.sampleRate = model.sampleRate
-        let windowSeconds = max(6.0, min(20.0, Double(max(1, config.maxDecodeWindows)) * 8.0))
+        let windowSeconds = max(3.0, min(6.0, Double(max(1, config.maxDecodeWindows)) * 4.0))
         self.windowSamples = max(model.sampleRate, Int(round(windowSeconds * Double(model.sampleRate))))
-        self.minimumPartialSamples = max(model.sampleRate, Int(round(2.0 * Double(model.sampleRate))))
+        self.minimumPartialSamples = max(model.sampleRate, Int(round(1.25 * Double(model.sampleRate))))
+        self.partialWindowSamples = max(
+            self.minimumPartialSamples,
+            Int(round(min(windowSeconds, 2.5) * Double(model.sampleRate)))
+        )
 
         var continuation: AsyncStream<TranscriptionEvent>.Continuation!
         self.events = AsyncStream { continuation = $0 }
@@ -256,10 +261,14 @@ private final class MossStreamingInferenceSessionCore: @unchecked Sendable, Stre
 
                 state.isDecoding = true
                 state.lastDecodeTime = now
+                let pendingCount = state.pendingSamples.count
+                let partialCount = min(pendingCount, partialWindowSamples)
+                let partialStart = pendingCount - partialCount
+                let partialSamples = Array(state.pendingSamples[partialStart..<pendingCount])
                 return MossDecodeLaunch(
-                    samples: state.pendingSamples,
+                    samples: partialSamples,
                     kind: .partial,
-                    offsetSeconds: Double(state.pendingStartSample) / Double(sampleRate),
+                    offsetSeconds: Double(state.pendingStartSample + partialStart) / Double(sampleRate),
                     totalSamples: state.totalSamplesFed,
                     encodedWindowCount: state.finalizedWindowCount
                 )
@@ -307,11 +316,38 @@ private final class MossStreamingInferenceSessionCore: @unchecked Sendable, Stre
 
         let decodeStart = Date()
         let output: STTOutput
+        var liveText = ""
+        let currentWindowSeconds = Double(params.audio.value.dim(0)) / Double(params.model.value.sampleRate)
+        let maxTokens: Int?
+        switch params.kind {
+        case .partial:
+            maxTokens = min(params.config.maxTokensPerPass, max(48, Int(ceil(currentWindowSeconds * 16.0))))
+        case .finalWindow:
+            maxTokens = nil
+        }
+        let onText: (String) -> Void = { delta in
+            guard !Task.isCancelled, !delta.isEmpty else { return }
+            liveText += delta
+            let provisional = liveText.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !provisional.isEmpty else { return }
+            let completed = sharedState.withLock { state -> String in
+                state.provisionalText = provisional
+                return state.completedText
+            }
+            yieldMossDisplayUpdate(
+                completedText: completed,
+                provisionalText: provisional,
+                continuation: continuation
+            )
+        }
+
         do {
             output = try params.model.value.streamingTranscribeWindow(
                 audio: params.audio.value,
                 offsetSeconds: params.offsetSeconds,
-                config: params.config
+                config: params.config,
+                maxTokens: maxTokens,
+                onText: onText
             )
         } catch {
             return
@@ -326,10 +362,11 @@ private final class MossStreamingInferenceSessionCore: @unchecked Sendable, Stre
                 state.provisionalText = text
                 return state.completedText
             }
-            continuation?.yield(.displayUpdate(
-                confirmedText: completed,
-                provisionalText: text
-            ))
+            yieldMossDisplayUpdate(
+                completedText: completed,
+                provisionalText: text,
+                continuation: continuation
+            )
 
         case .finalWindow:
             let completed = sharedState.withLock { state -> String in
@@ -345,7 +382,6 @@ private final class MossStreamingInferenceSessionCore: @unchecked Sendable, Stre
 
         let decodeTime = Date().timeIntervalSince(decodeStart)
         let totalAudioSeconds = Double(params.totalSamples) / Double(params.model.value.sampleRate)
-        let currentWindowSeconds = Double(params.audio.value.dim(0)) / Double(params.model.value.sampleRate)
         continuation?.yield(.stats(StreamingStats(
             encodedWindowCount: max(params.encodedWindowCount, Int(ceil(totalAudioSeconds / max(currentWindowSeconds, 0.001)))),
             totalAudioSeconds: totalAudioSeconds,
@@ -353,6 +389,22 @@ private final class MossStreamingInferenceSessionCore: @unchecked Sendable, Stre
             realTimeFactor: decodeTime / max(currentWindowSeconds, 0.001),
             peakMemoryGB: output.peakMemoryUsage
         )))
+    }
+
+    private static func yieldMossDisplayUpdate(
+        completedText: String,
+        provisionalText: String,
+        continuation: AsyncStream<TranscriptionEvent>.Continuation?
+    ) {
+        let confirmedText = !completedText.isEmpty
+            && !provisionalText.isEmpty
+            && !provisionalText.hasPrefix("\n")
+            ? completedText + "\n"
+            : completedText
+        continuation?.yield(.displayUpdate(
+            confirmedText: confirmedText,
+            provisionalText: provisionalText
+        ))
     }
 
     private static func appendMossText(_ segment: String, to base: inout String) {

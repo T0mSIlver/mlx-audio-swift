@@ -767,19 +767,23 @@ extension MossTranscribeDiarizeModel {
     func streamingTranscribeWindow(
         audio: MLXArray,
         offsetSeconds: Double,
-        config: StreamingConfig
+        config: StreamingConfig,
+        maxTokens: Int? = nil,
+        onText: ((String) -> Void)? = nil
     ) throws -> STTOutput {
         let defaults = defaultGenerationParameters
         let audioSeconds = Double(audio.dim(0)) / Double(sampleRate)
         let estimatedWindowTokens = max(96, Int(ceil(audioSeconds * 32.0)))
+        let requestedMaxTokens = maxTokens ?? min(max(1, config.maxTokensPerPass), estimatedWindowTokens)
         return try generateSingleChunk(
             audio: audio,
-            maxTokens: min(max(1, config.maxTokensPerPass), estimatedWindowTokens),
+            maxTokens: max(1, requestedMaxTokens),
             temperature: config.temperature,
             repetitionPenalty: defaults.repetitionPenalty,
             repetitionContextSize: defaults.repetitionContextSize,
             prompt: nil,
-            offsetSeconds: offsetSeconds
+            offsetSeconds: offsetSeconds,
+            onText: onText
         )
     }
 
