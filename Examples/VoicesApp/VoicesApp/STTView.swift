@@ -20,6 +20,11 @@ struct STTView: View {
     #endif
 
     var body: some View {
+        let transcriptSegments = TaggedTranscriptParser.parse(viewModel.transcriptionText)
+        let activeTranscriptSegmentID = viewModel.isPlaying
+            ? TaggedTranscriptParser.activeSegmentID(in: transcriptSegments, at: viewModel.currentTime)
+            : nil
+
         VStack(spacing: 0) {
             // Transcription result area
             ScrollViewReader { proxy in
@@ -39,7 +44,12 @@ struct STTView: View {
                     } else if viewModel.transcriptionText.isEmpty && viewModel.isRecording {
                         RecordingTranscriptPlaceholder(supportsRealtime: viewModel.supportsRealtimeRecording)
                     } else {
-                        TranscriptOutputView(text: viewModel.transcriptionText, font: bodyFont)
+                        TranscriptOutputView(
+                            text: viewModel.transcriptionText,
+                            font: bodyFont,
+                            segments: transcriptSegments,
+                            activeSegmentID: activeTranscriptSegmentID
+                        )
 
                         Color.clear
                             .frame(height: 1)
@@ -49,6 +59,12 @@ struct STTView: View {
                 .onChange(of: viewModel.transcriptionText) {
                     withAnimation(.easeOut(duration: 0.15)) {
                         proxy.scrollTo("bottom", anchor: .bottom)
+                    }
+                }
+                .onChange(of: activeTranscriptSegmentID) { _, segmentID in
+                    guard viewModel.isPlaying, let segmentID else { return }
+                    withAnimation(.easeOut(duration: 0.2)) {
+                        proxy.scrollTo(segmentID, anchor: .center)
                     }
                 }
             }
@@ -389,10 +405,8 @@ struct STTView: View {
 private struct TranscriptOutputView: View {
     let text: String
     let font: Font
-
-    private var segments: [TaggedTranscriptSegment] {
-        TaggedTranscriptParser.parse(text)
-    }
+    let segments: [TaggedTranscriptSegment]
+    let activeSegmentID: TaggedTranscriptSegment.ID?
 
     var body: some View {
         if segments.isEmpty {
@@ -404,7 +418,12 @@ private struct TranscriptOutputView: View {
         } else {
             LazyVStack(alignment: .leading, spacing: 8) {
                 ForEach(segments) { segment in
-                    TaggedTranscriptSegmentRow(segment: segment, font: font)
+                    TaggedTranscriptSegmentRow(
+                        segment: segment,
+                        font: font,
+                        isActive: segment.id == activeSegmentID
+                    )
+                    .id(segment.id)
                 }
             }
             .padding()
@@ -416,41 +435,51 @@ private struct TranscriptOutputView: View {
 private struct TaggedTranscriptSegmentRow: View {
     let segment: TaggedTranscriptSegment
     let font: Font
+    let isActive: Bool
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 8) {
-            HStack(spacing: 8) {
-                Text(segment.speaker)
-                    .font(.caption.monospaced().weight(.semibold))
-                    .foregroundStyle(speakerColor)
-                    .padding(.horizontal, 8)
-                    .padding(.vertical, 4)
-                    .background(speakerColor.opacity(0.14))
-                    .clipShape(RoundedRectangle(cornerRadius: 6, style: .continuous))
+        HStack(alignment: .top, spacing: 10) {
+            Capsule()
+                .fill(speakerColor)
+                .frame(width: 4)
+                .padding(.vertical, 2)
+                .opacity(isActive ? 1 : 0)
 
-                Text(segment.formattedTimeRange)
-                    .font(.caption.monospacedDigit())
-                    .foregroundStyle(.secondary)
+            VStack(alignment: .leading, spacing: 8) {
+                HStack(spacing: 8) {
+                    Text(segment.speaker)
+                        .font(.caption.monospaced().weight(.semibold))
+                        .foregroundStyle(speakerColor)
+                        .padding(.horizontal, 8)
+                        .padding(.vertical, 4)
+                        .background(speakerColor.opacity(isActive ? 0.22 : 0.14))
+                        .clipShape(RoundedRectangle(cornerRadius: 6, style: .continuous))
 
-                Spacer(minLength: 0)
+                    Text(segment.formattedTimeRange)
+                        .font(.caption.monospacedDigit())
+                        .foregroundStyle(isActive ? .primary : .secondary)
+
+                    Spacer(minLength: 0)
+                }
+
+                Text(segment.text)
+                    .font(font)
+                    .foregroundStyle(.primary)
+                    .fixedSize(horizontal: false, vertical: true)
             }
-
-            Text(segment.text)
-                .font(font)
-                .foregroundStyle(.primary)
-                .fixedSize(horizontal: false, vertical: true)
         }
         .frame(maxWidth: .infinity, alignment: .leading)
         .padding(.horizontal, 10)
         .padding(.vertical, 8)
         .background(
             RoundedRectangle(cornerRadius: 8, style: .continuous)
-                .fill(Color.primary.opacity(0.035))
+                .fill(isActive ? speakerColor.opacity(0.12) : Color.primary.opacity(0.035))
         )
         .overlay {
             RoundedRectangle(cornerRadius: 8, style: .continuous)
-                .stroke(speakerColor.opacity(0.14), lineWidth: 1)
+                .stroke(speakerColor.opacity(isActive ? 0.6 : 0.14), lineWidth: isActive ? 1.5 : 1)
         }
+        .animation(.easeOut(duration: 0.16), value: isActive)
     }
 
     private var speakerColor: Color {
@@ -471,7 +500,9 @@ private struct TaggedTranscriptSegment: Identifiable {
     let id: Int
     let speaker: String
     let startTime: String
+    let startSeconds: TimeInterval
     let endTime: String?
+    let endSeconds: TimeInterval?
     let text: String
 
     var formattedTimeRange: String {
@@ -494,7 +525,7 @@ private struct TaggedTranscriptSegment: Identifiable {
         )
     }
 
-    private static func timestampValue(_ text: String) -> Double? {
+    static func timestampValue(_ text: String) -> Double? {
         Double(text.replacingOccurrences(of: ",", with: "."))
     }
 }
@@ -518,7 +549,8 @@ private enum TaggedTranscriptParser {
             guard
                 let matchRange = Range(match.range, in: text),
                 let startRange = Range(match.range(at: 1), in: text),
-                let speakerRange = Range(match.range(at: 2), in: text)
+                let speakerRange = Range(match.range(at: 2), in: text),
+                let startSeconds = TaggedTranscriptSegment.timestampValue(String(text[startRange]))
             else {
                 return nil
             }
@@ -534,6 +566,7 @@ private enum TaggedTranscriptParser {
             var segmentText = String(text[matchRange.upperBound..<bodyEnd])
                 .trimmingCharacters(in: .whitespacesAndNewlines)
             let endTime = stripTrailingTimestamp(from: &segmentText)
+            let endSeconds = endTime.flatMap(TaggedTranscriptSegment.timestampValue)
 
             guard !segmentText.isEmpty else { return nil }
 
@@ -541,10 +574,29 @@ private enum TaggedTranscriptParser {
                 id: index,
                 speaker: String(text[speakerRange]).uppercased(),
                 startTime: String(text[startRange]),
+                startSeconds: startSeconds,
                 endTime: endTime,
+                endSeconds: endSeconds,
                 text: segmentText
             )
         }
+    }
+
+    static func activeSegmentID(in segments: [TaggedTranscriptSegment], at time: TimeInterval) -> TaggedTranscriptSegment.ID? {
+        for (index, segment) in segments.enumerated() {
+            let nextStart = index + 1 < segments.count ? segments[index + 1].startSeconds : nil
+            let end = segment.endSeconds ?? nextStart
+
+            if let end {
+                if time >= segment.startSeconds && time < max(end, segment.startSeconds) {
+                    return segment.id
+                }
+            } else if time >= segment.startSeconds {
+                return segment.id
+            }
+        }
+
+        return nil
     }
 
     private static func stripTrailingTimestamp(from text: inout String) -> String? {
