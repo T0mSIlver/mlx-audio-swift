@@ -17,6 +17,64 @@ private let mossDefaultPrompt = """
 Transcribe the audio into text. Start each segment with the start timestamp and speaker label ([S01], [S02], [S03], ...), write the corresponding spoken content, and end each segment with the ending timestamp to clearly mark the segment range.
 """
 
+private struct MossTimestampTagOffsetter {
+    let offsetSeconds: Double
+    private var bufferedTag = ""
+    private var isBufferingTag = false
+
+    init(offsetSeconds: Double) {
+        self.offsetSeconds = offsetSeconds
+    }
+
+    mutating func consume(_ text: String) -> String {
+        guard offsetSeconds != 0 else { return text }
+
+        var output = ""
+        for character in text {
+            if isBufferingTag {
+                bufferedTag.append(character)
+                if character == "]" {
+                    output += offsetTag(bufferedTag)
+                    bufferedTag = ""
+                    isBufferingTag = false
+                } else if bufferedTag.count > 24 {
+                    output += bufferedTag
+                    bufferedTag = ""
+                    isBufferingTag = false
+                }
+            } else if character == "[" {
+                bufferedTag = "["
+                isBufferingTag = true
+            } else {
+                output.append(character)
+            }
+        }
+
+        return output
+    }
+
+    mutating func finish() -> String {
+        guard isBufferingTag else { return "" }
+        defer {
+            bufferedTag = ""
+            isBufferingTag = false
+        }
+        return bufferedTag
+    }
+
+    private func offsetTag(_ tag: String) -> String {
+        guard
+            tag.hasPrefix("["),
+            tag.hasSuffix("]"),
+            let value = Double(tag.dropFirst().dropLast().replacingOccurrences(of: ",", with: "."))
+        else {
+            return tag
+        }
+
+        return String(format: "[%.2f]", locale: Locale(identifier: "en_US_POSIX"), value + offsetSeconds)
+    }
+}
+
 public struct MossTranscribeDiarizeStreamingResult: Sendable {
     public let text: String
     public let isFinal: Bool
@@ -286,6 +344,7 @@ public final class MossTranscribeDiarizeModel: Module, STTGenerationModel {
 
                     for (chunkAudio, offsetSeconds) in chunks {
                         try Task.checkCancellation()
+                        var emittedChunkText = false
 
                         // MOSS emits verbose timestamped diarization text, so the UI's
                         // maxTokens setting is a per-chunk decode cap for long audio.
@@ -297,14 +356,19 @@ public final class MossTranscribeDiarizeModel: Module, STTGenerationModel {
                             repetitionContextSize: generationParameters.repetitionContextSize,
                             prompt: nil,
                             offsetSeconds: Double(offsetSeconds)
-                        )
-                        outputs.append(output)
-
-                        let text = output.text.trimmingCharacters(in: .whitespacesAndNewlines)
-                        if !text.isEmpty {
-                            continuation.yield(.token(emittedText ? "\n" + text : text))
-                            emittedText = true
+                        ) { text in
+                            guard !text.isEmpty else { return }
+                            if !emittedText {
+                                continuation.yield(.token(text))
+                                emittedText = true
+                            } else if !emittedChunkText {
+                                continuation.yield(.token("\n" + text))
+                            } else {
+                                continuation.yield(.token(text))
+                            }
+                            emittedChunkText = true
                         }
+                        outputs.append(output)
 
                         Memory.clearCache()
                     }
@@ -554,13 +618,15 @@ private extension MossTranscribeDiarizeModel {
         repetitionPenalty: Float,
         repetitionContextSize: Int,
         prompt: String?,
-        offsetSeconds: Double
+        offsetSeconds: Double,
+        onText: ((String) -> Void)? = nil
     ) throws -> STTOutput {
         let start = Date()
         let prefillStart = Date()
         let prepared = try prepareGenerationInputs(audio: audio, prompt: prompt)
         let prefillTime = Date().timeIntervalSince(prefillStart)
         let genStart = Date()
+        var offsetter = MossTimestampTagOffsetter(offsetSeconds: offsetSeconds)
         let generatedTokens = try generateTokenIds(
             promptIds: prepared.promptIds,
             inputEmbeddings: prepared.inputEmbeddings,
@@ -568,7 +634,17 @@ private extension MossTranscribeDiarizeModel {
             temperature: temperature,
             repetitionPenalty: repetitionPenalty,
             repetitionContextSize: repetitionContextSize
-        )
+        ) { token in
+            let rawDelta = self.tokenizer?.decode(tokens: [token], skipSpecialTokens: true) ?? ""
+            let shiftedDelta = offsetter.consume(rawDelta)
+            if !shiftedDelta.isEmpty {
+                onText?(shiftedDelta)
+            }
+        }
+        let bufferedText = offsetter.finish()
+        if !bufferedText.isEmpty {
+            onText?(bufferedText)
+        }
         let genTime = Date().timeIntervalSince(genStart)
         let rawText = tokenizer?
             .decode(tokens: generatedTokens, skipSpecialTokens: true)
@@ -602,7 +678,8 @@ private extension MossTranscribeDiarizeModel {
         maxTokens: Int,
         temperature: Float,
         repetitionPenalty: Float,
-        repetitionContextSize: Int
+        repetitionContextSize: Int,
+        onToken: ((Int) -> Void)? = nil
     ) throws -> [Int] {
         let cache = makeCache()
         let prefillStepSize = 2048
@@ -639,6 +716,7 @@ private extension MossTranscribeDiarizeModel {
                 break
             }
             generated.append(token)
+            onToken?(token)
 
             if repetitionPenalty == 1.0 && generated.count >= 24 {
                 let tail = generated.suffix(24)
