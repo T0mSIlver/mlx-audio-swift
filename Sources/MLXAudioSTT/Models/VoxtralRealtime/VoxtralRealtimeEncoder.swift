@@ -33,8 +33,9 @@ func voxtralApplyInterleavedRoPE(
     let x1 = reshaped[0..., 0..., 0..., 0]
     let x2 = reshaped[0..., 0..., 0..., 1]
 
-    let cosE = cos.expandedDimensions(axis: 1)
-    let sinE = sin.expandedDimensions(axis: 1)
+    // cos/sin are float32 for precision; cast down so rotating fp16 q/k stays fp16.
+    let cosE = cos.expandedDimensions(axis: 1).asType(x.dtype)
+    let sinE = sin.expandedDimensions(axis: 1).asType(x.dtype)
 
     let o1 = x1 * cosE - x2 * sinE
     let o2 = x2 * cosE + x1 * sinE
@@ -165,7 +166,8 @@ final class VoxtralRealtimeEncoderAttention: Module {
             let causal = kPos .<= qPos
             let window = kPos .>= (qPos - MLXArray(Int32(slidingWindow - 1)))
             let allowed = logicalAnd(causal, window)
-            let mask = MLX.where(allowed, MLXArray(0.0), MLXArray(-1e9))
+            // Match the activation dtype: a float32 mask over fp16 q/k aborts SDPA.
+            let mask = MLX.where(allowed, MLXArray(0.0), MLXArray(-1e9)).asType(q.dtype)
             maskMode = .array(mask)
         }
 
@@ -263,7 +265,8 @@ final class VoxtralRealtimeAudioEncoder: Module {
     }
 
     func convStem(_ mel: MLXArray) -> MLXArray {
-        var x = mel.transposed(1, 0).expandedDimensions(axis: 0)
+        // mel is float32; cast to the conv weight dtype so encoder activations stay fp16.
+        var x = mel.asType(convLayers0Conv.conv.weight.dtype).transposed(1, 0).expandedDimensions(axis: 0)
         x = gelu(convLayers0Conv(x))
         x = gelu(convLayers1Conv(x))
         x = x.squeezed(axis: 0)
