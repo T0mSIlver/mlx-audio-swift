@@ -157,13 +157,20 @@ public final class VoxtralRealtimeStreamSession {
         }
 
         guard let adapter = adapterBuf else {
-            Memory.clearCache()
             return Delta(text: "", tokenIds: [])
         }
         prefillIfNeeded(adapter: adapter)
         let delta = decode(adapter: adapter, upTo: min(emitLimit, adapter.shape[0]))
 
-        Memory.clearCache()
+        // Clearing the buffer pool every step forces the whole working set to be
+        // re-allocated cold from the Metal driver 10x/s in live streaming and defeats
+        // any `Memory.cacheLimit` the host process sets. Match the offline `generate`
+        // loop instead: clear every 256 decoded tokens (see `decode`), plus once when
+        // the utterance finishes so memory returns to the weight floor between
+        // sessions. Callers that need a hard bound set `Memory.cacheLimit`.
+        if final {
+            Memory.clearCache()
+        }
         return delta
     }
 
@@ -228,6 +235,10 @@ public final class VoxtralRealtimeStreamSession {
             lastLogits = model.decoder.logits(next.0[0])
             decPos += 1
             MLX.eval(lastLogits!)
+            // Same cadence as the offline `generate` loop.
+            if generated.count % 256 == 0 {
+                Memory.clearCache()
+            }
         }
 
         let textSoFar = model.decodeStreaming(generated)
