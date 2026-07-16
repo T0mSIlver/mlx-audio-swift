@@ -11,10 +11,12 @@ import MLXAudioCore
 // the model's native transcription delay — O(1) work per chunk.
 //
 // Correctness (WER 0 vs offline):
-//   * conv stem is causal and `prepareMel` right-pads with zeros, so `convOut[0..<k]`
-//     re-derived from a prefix is bit-identical to the offline full encode for every
-//     frozen row k. The only unfrozen row is the trailing partial token (chunk ended
-//     mid-1280-sample-token) — guarded by `frozenGuardTokens`.
+//   * the mel/conv front end runs incrementally with carried tails
+//     (`VoxtralRealtimeMelStream` + `convStemStep`): mel windows are emitted only
+//     once complete and both convs are causal, so every produced row is final and
+//     bit-identical to the offline full encode at the same absolute index. Only
+//     whole-token rows below the freeze point are fed onward; the trailing partial
+//     token (chunk ended mid-1280-sample-token) is guarded by `frozenGuardTokens`.
 //   * RoPE attention is relative-position invariant, so feeding conv frames in
 //     sliding-window-aligned blocks with the cache RESET at each boundary reproduces
 //     `encodeChunked` (>sw) exactly; a single un-reset block reproduces `encodeFull`
@@ -78,7 +80,18 @@ public final class VoxtralRealtimeStreamSession {
     // Only the trailing partial token (chunk ended mid-1280-sample-token) is unfrozen.
     private let frozenGuardTokens = 1
 
-    private var realAudio: [Float] = []
+    // Incremental front-end state. `melStream` carries the not-yet-framed sample
+    // tail, `convState` the causal-conv tails, and `convRows` every conv-stem row
+    // produced so far (all final — see the correctness notes above). `flushed`
+    // means `finish()` sealed the stream by appending the offline right-pad.
+    private var pendingSamples: [Float] = []
+    private var realSamplesFed = 0
+    private var melStream: VoxtralRealtimeMelStream?
+    private var convState = VoxtralRealtimeConvStemState()
+    private var convRows: MLXArray?
+    private var nDelayTokens = 0
+    private var flushed = false
+
     private var encState: VoxtralRealtimeStreamEncoderState
     private var adapterBuf: MLXArray?
     private var decCache: [VoxtralRealtimeDecoderKVCache?]?
@@ -114,9 +127,10 @@ public final class VoxtralRealtimeStreamSession {
     public var isFinished: Bool { done }
 
     /// Ingest a chunk of 16 kHz mono samples; returns the text decoded by this call.
+    /// Calls after `finish()` are ignored (the stream is sealed by the final pad).
     @discardableResult
     public func step(_ samples: [Float]) -> Delta {
-        realAudio.append(contentsOf: samples)
+        pendingSamples.append(contentsOf: samples)
         return advance(final: false)
     }
 
@@ -135,26 +149,72 @@ public final class VoxtralRealtimeStreamSession {
 
     private func advance(final: Bool) -> Delta {
         guard !done else { return Delta(text: "", tokenIds: []) }
-        guard !realAudio.isEmpty else { return Delta(text: "", tokenIds: []) }
+        if flushed {
+            pendingSamples.removeAll()   // the final pad sealed the stream
+            guard final else { return Delta(text: "", tokenIds: []) }
+        }
+        guard realSamplesFed + pendingSamples.count > 0 else { return Delta(text: "", tokenIds: []) }
 
         let ds = model.config.encoderArgs.downsampleFactor
-        let audio = MLXArray(realAudio)
-        let (convOut, nAudioTotal, pLen) = model.convStemForAudio(
-            audio: audio,
-            transcriptionDelayMs: transcriptionDelayMs
-        )
-        promptLength = pLen
+        let audioArgs = model.config.audioEncodingArgs
+        let samplesPerToken = Int(Float(audioArgs.samplingRate) / audioArgs.frameRate) // 1280
 
-        let realRegion = model.config.nLeftPadTokens + model.numAudioTokens(realAudio.count)
-        let emitLimit = final ? nAudioTotal : max(0, min(nAudioTotal, realRegion - frozenGuardTokens))
-        let convFreeze = min(convOut.shape[0], emitLimit * ds)
+        if melStream == nil {
+            model.ensureAdaScales(transcriptionDelayMs: transcriptionDelayMs)
+            let delayMs = transcriptionDelayMs ?? model.config.transcriptionDelayMs
+            nDelayTokens = model.numDelayTokens(delayMs)
+            promptLength = 1 + model.config.nLeftPadTokens + nDelayTokens
+            melStream = VoxtralRealtimeMelStream(
+                leftPadSamples: model.config.nLeftPadTokens * samplesPerToken,
+                melFilters: model.ensureMelFilters(),
+                windowSize: audioArgs.windowSize,
+                hopLength: audioArgs.hopLength,
+                globalLogMelMax: audioArgs.globalLogMelMax
+            )
+        }
 
-        if convFreeze > encState.consumed {
-            let newEnc = model.encoder.feedIncremental(convOut, upTo: convFreeze, state: &encState)
+        // Move new audio into the mel stream — plus, on finish, the exact right-pad
+        // `prepareMel` would append (token alignment + `(nDelay + 1) + 10` tokens of
+        // zeros) and the trailing reflect-pad samples. Only final data enters carried
+        // state: mel windows are emitted once complete, so the still-growing stream
+        // end is never cached, only re-covered by the retained sample tail.
+        var newSamples = pendingSamples
+        pendingSamples.removeAll(keepingCapacity: true)
+        realSamplesFed += newSamples.count
+        if final && !flushed {
+            let alignPad = (samplesPerToken - realSamplesFed % samplesPerToken) % samplesPerToken
+            let rightPad = ((nDelayTokens + 1) + 10) * samplesPerToken
+            newSamples += [Float](
+                repeating: 0,
+                count: alignPad + rightPad + melStream!.finishTailPadCount
+            )
+            flushed = true
+        }
+
+        let newMel = melStream!.append(newSamples)
+        if newMel.shape[1] > 0 {
+            let rows = model.encoder.convStemStep(newMel, state: &convState)
+            if rows.shape[0] > 0 {
+                convRows = convRows == nil ? rows : MLX.concatenated([convRows!, rows], axis: 0)
+            }
+        }
+        let convRowCount = convRows?.shape[0] ?? 0
+
+        // Emit ceiling: with audio still arriving, the whole-token span covered by
+        // real samples minus the trailing partial-token guard. The offline path's
+        // `min(nAudioTotal, …)` clamp can never bind before finish — its right-pad
+        // always spans ≥ 11 extra tokens past `realRegion`. After the final pad,
+        // every produced row is decodable (`nAudioTotal` == total rows / ds).
+        let realRegion = model.config.nLeftPadTokens + model.numAudioTokens(realSamplesFed)
+        let emitLimit = final ? convRowCount / ds : max(0, realRegion - frozenGuardTokens)
+        let convFreeze = min(convRowCount / ds, emitLimit) * ds
+
+        if convFreeze > encState.consumed, let convRows {
+            let newEnc = model.encoder.feedIncremental(convRows, upTo: convFreeze, state: &encState)
             let rows = model.encoder.downsampleAndProject(newEnc)   // multiple-of-ds ⇒ whole rows
             adapterBuf = adapterBuf == nil ? rows : MLX.concatenated([adapterBuf!, rows], axis: 0)
-            freezeEncoderState()
         }
+        freezeEncoderState()
 
         guard let adapter = adapterBuf else {
             Memory.clearCache()
@@ -167,10 +227,14 @@ public final class VoxtralRealtimeStreamSession {
         return delta
     }
 
-    /// Materialise the adapter buffer + encoder caches so the lazy graph stays bounded
-    /// across chunks (each chunk would otherwise extend one unbroken graph).
+    /// Materialise the carried front-end arrays (conv rows + conv tails), the adapter
+    /// buffer, and the encoder caches so the lazy graph stays bounded across chunks
+    /// (each chunk would otherwise extend one unbroken graph).
     private func freezeEncoderState() {
         var arrays: [MLXArray] = []
+        if let convRows { arrays.append(convRows) }
+        if let carry = convState.conv1Carry { arrays.append(carry) }
+        if let carry = convState.conv2Carry { arrays.append(carry) }
         if let adapterBuf { arrays.append(adapterBuf) }
         for cache in encState.caches {
             if let cache { arrays.append(cache.keys); arrays.append(cache.values) }
