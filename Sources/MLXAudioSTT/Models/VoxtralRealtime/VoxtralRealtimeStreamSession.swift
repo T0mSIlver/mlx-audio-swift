@@ -153,7 +153,12 @@ public final class VoxtralRealtimeStreamSession {
             pendingSamples.removeAll()   // the final pad sealed the stream
             guard final else { return Delta(text: "", tokenIds: []) }
         }
-        guard realSamplesFed + pendingSamples.count > 0 else { return Delta(text: "", tokenIds: []) }
+        // With no audio yet there is nothing to advance — except on finish(), where
+        // the offline path still transcribes the zero-padded empty stream, so the
+        // final pad alone must drive the pipeline to match `generate(...)`.
+        guard final || realSamplesFed + pendingSamples.count > 0 else {
+            return Delta(text: "", tokenIds: [])
+        }
 
         let ds = model.config.encoderArgs.downsampleFactor
         let audioArgs = model.config.audioEncodingArgs
