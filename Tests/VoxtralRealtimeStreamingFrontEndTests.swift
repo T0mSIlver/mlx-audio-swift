@@ -163,9 +163,134 @@ struct VoxtralRealtimeStreamingFrontEndTests {
         #expect(session.tokens.count == offline.generationTokens)
     }
 
+    /// Degenerate feed: the whole utterance in a single step(), then finish().
+    @Test func singleGiantChunkMatchesOffline() throws {
+        let fixtureDir = try Self.makeRandomFixture()
+        defer { try? FileManager.default.removeItem(at: fixtureDir) }
+
+        let model = try VoxtralRealtimeModel.fromDirectory(fixtureDir)
+        let samples = Self.sweep(20_000)
+        let params = STTGenerateParameters(maxTokens: 16, temperature: 0.0)
+        let offline = model.generate(audio: MLXArray(samples), generationParameters: params)
+
+        let session = model.makeStreamSession(maxTokens: 16)
+        _ = session.step(samples)
+        _ = session.finish()
+
+        #expect(session.text == offline.text)
+        #expect(session.tokens.count == offline.generationTokens)
+    }
+
+    /// finish() seals the stream: later step() calls change nothing.
+    @Test func stepAfterFinishIsIgnored() throws {
+        let fixtureDir = try Self.makeRandomFixture()
+        defer { try? FileManager.default.removeItem(at: fixtureDir) }
+
+        let model = try VoxtralRealtimeModel.fromDirectory(fixtureDir)
+        let session = model.makeStreamSession(maxTokens: 16)
+        _ = session.step(Self.sweep(20_000))
+        _ = session.finish()
+
+        let textBefore = session.text
+        let tokensBefore = session.tokens
+        let delta = session.step(Self.sweep(5_000))
+
+        #expect(delta.text.isEmpty)
+        #expect(delta.tokenIds.isEmpty)
+        #expect(session.text == textBefore)
+        #expect(session.tokens == tokensBefore)
+    }
+
+    /// A second finish() must not re-append the final pad or decode further.
+    @Test func doubleFinishIsANoOp() throws {
+        let fixtureDir = try Self.makeRandomFixture()
+        defer { try? FileManager.default.removeItem(at: fixtureDir) }
+
+        let model = try VoxtralRealtimeModel.fromDirectory(fixtureDir)
+        let session = model.makeStreamSession(maxTokens: 16)
+        _ = session.step(Self.sweep(20_000))
+        _ = session.finish()
+
+        let textBefore = session.text
+        let tokensBefore = session.tokens
+        let delta = session.finish()
+
+        #expect(delta.text.isEmpty)
+        #expect(delta.tokenIds.isEmpty)
+        #expect(session.text == textBefore)
+        #expect(session.tokens == tokensBefore)
+    }
+
+    /// Non-zero transcription delay changes the prompt length and the right pad;
+    /// the streamed result must still equal offline exactly.
+    @Test func nonZeroTranscriptionDelayMatchesOffline() throws {
+        let fixtureDir = try Self.makeRandomFixture(transcriptionDelayMs: 960)
+        defer { try? FileManager.default.removeItem(at: fixtureDir) }
+
+        let model = try VoxtralRealtimeModel.fromDirectory(fixtureDir)
+        let samples = Self.sweep(20_000)
+        let params = STTGenerateParameters(maxTokens: 16, temperature: 0.0)
+        let offline = model.generate(audio: MLXArray(samples), generationParameters: params)
+
+        let session = model.makeStreamSession(maxTokens: 16, transcriptionDelayMs: 960)
+        for chunk in Self.chunked(samples) {
+            _ = session.step(chunk)
+        }
+        _ = session.finish()
+
+        #expect(session.text == offline.text)
+        #expect(session.tokens.count == offline.generationTokens)
+    }
+
+    /// With one real encoder transformer layer and enough audio that the conv rows
+    /// cross the 64-frame sliding-window boundary twice, the incremental
+    /// cache-reset path (`feedIncremental`) must reproduce `encodeChunked` exactly.
+    @Test func slidingWindowCrossingMatchesOffline() throws {
+        let fixtureDir = try Self.makeRandomFixture(encoderLayers: 1)
+        defer { try? FileManager.default.removeItem(at: fixtureDir) }
+
+        let model = try VoxtralRealtimeModel.fromDirectory(fixtureDir)
+        // 30 000 samples ⇒ (1 + 24 + 11) tokens ⇒ 144 conv rows > 2 × 64.
+        let samples = Self.sweep(30_000)
+        let params = STTGenerateParameters(maxTokens: 32, temperature: 0.0)
+        let offline = model.generate(audio: MLXArray(samples), generationParameters: params)
+
+        let session = model.makeStreamSession(maxTokens: 32)
+        for chunk in Self.chunked(samples) {
+            _ = session.step(chunk)
+        }
+        _ = session.finish()
+
+        #expect(session.text == offline.text)
+        #expect(session.tokens.count == offline.generationTokens)
+    }
+
+    /// finish() with no audio at all must still transcribe the zero-padded empty
+    /// stream, exactly like `generate` over an empty buffer.
+    @Test func emptyAudioFinishMatchesOffline() throws {
+        let fixtureDir = try Self.makeRandomFixture()
+        defer { try? FileManager.default.removeItem(at: fixtureDir) }
+
+        let model = try VoxtralRealtimeModel.fromDirectory(fixtureDir)
+        let params = STTGenerateParameters(maxTokens: 16, temperature: 0.0)
+        let offline = model.generate(audio: MLXArray([Float]()), generationParameters: params)
+
+        let session = model.makeStreamSession(maxTokens: 16)
+        _ = session.finish()
+
+        #expect(session.text == offline.text)
+        #expect(session.tokens.count == offline.generationTokens)
+    }
+
     /// Like `VoxtralRealtimeSTTTests.makeEOSFixture`, but with seeded random
     /// weights so the decoded tokens actually depend on the conv-stem rows.
-    private static func makeRandomFixture() throws -> URL {
+    /// `encoderLayers` may be 0 (front end only) or 1 (exercises the encoder
+    /// transformer + sliding-window cache path too).
+    private static func makeRandomFixture(
+        transcriptionDelayMs: Int = 0,
+        encoderLayers: Int = 0
+    ) throws -> URL {
+        precondition((0...1).contains(encoderLayers))
         let fixtureDir = FileManager.default.temporaryDirectory
             .appendingPathComponent("voxtral-random-fixture-\(UUID().uuidString)")
         try FileManager.default.createDirectory(at: fixtureDir, withIntermediateDirectories: true)
@@ -174,7 +299,7 @@ struct VoxtralRealtimeStreamingFrontEndTests {
         {
           "model_type": "voxtral_realtime",
           "encoder_args": {
-            "dim": 16, "n_layers": 0, "n_heads": 2, "head_dim": 8, "hidden_dim": 32,
+            "dim": 16, "n_layers": \(encoderLayers), "n_heads": 2, "head_dim": 8, "hidden_dim": 32,
             "n_kv_heads": 2, "norm_eps": 1e-5, "rope_theta": 1000000,
             "sliding_window": 64, "causal": true, "use_biases": true, "downsample_factor": 4
           },
@@ -188,7 +313,7 @@ struct VoxtralRealtimeStreamingFrontEndTests {
             "sampling_rate": 16000, "frame_rate": 12.5, "num_mel_bins": 128,
             "hop_length": 160, "window_size": 400, "global_log_mel_max": 1.5
           },
-          "transcription_delay_ms": 0, "bos_token_id": 1, "eos_token_id": 0,
+          "transcription_delay_ms": \(transcriptionDelayMs), "bos_token_id": 1, "eos_token_id": 0,
           "streaming_pad_token_id": 2, "n_left_pad_tokens": 1
         }
         """
@@ -209,7 +334,7 @@ struct VoxtralRealtimeStreamingFrontEndTests {
             to: fixtureDir.appendingPathComponent("tekken.json"), atomically: true, encoding: .utf8)
 
         MLXRandom.seed(7)
-        let weights: [String: MLXArray] = [
+        var weights: [String: MLXArray] = [
             "encoder.conv_layers_0_conv.conv.weight": MLXRandom.normal([16, 3, 128]) * 0.2,
             "encoder.conv_layers_0_conv.conv.bias": MLXRandom.normal([16]) * 0.1,
             "encoder.conv_layers_1_conv.conv.weight": MLXRandom.normal([16, 3, 16]) * 0.2,
@@ -220,6 +345,22 @@ struct VoxtralRealtimeStreamingFrontEndTests {
             "decoder.tok_embeddings.weight": MLXRandom.normal([8, 16]) * 0.5,
             "decoder.norm.weight": MLXArray.ones([16], type: Float.self),
         ]
+        if encoderLayers == 1 {
+            let layer = "encoder.transformer_layers.0"
+            weights["\(layer).attention_norm.weight"] = MLXArray.ones([16], type: Float.self)
+            weights["\(layer).attention.wq.weight"] = MLXRandom.normal([16, 16]) * 0.2
+            weights["\(layer).attention.wq.bias"] = MLXRandom.normal([16]) * 0.1
+            weights["\(layer).attention.wk.weight"] = MLXRandom.normal([16, 16]) * 0.2
+            weights["\(layer).attention.wv.weight"] = MLXRandom.normal([16, 16]) * 0.2
+            weights["\(layer).attention.wv.bias"] = MLXRandom.normal([16]) * 0.1
+            weights["\(layer).attention.wo.weight"] = MLXRandom.normal([16, 16]) * 0.2
+            weights["\(layer).attention.wo.bias"] = MLXRandom.normal([16]) * 0.1
+            weights["\(layer).ffn_norm.weight"] = MLXArray.ones([16], type: Float.self)
+            weights["\(layer).feed_forward_w1.weight"] = MLXRandom.normal([32, 16]) * 0.2
+            weights["\(layer).feed_forward_w3.weight"] = MLXRandom.normal([32, 16]) * 0.2
+            weights["\(layer).feed_forward_w2.weight"] = MLXRandom.normal([16, 32]) * 0.2
+            weights["\(layer).feed_forward_w2.bias"] = MLXRandom.normal([16]) * 0.1
+        }
         try MLX.save(arrays: weights, url: fixtureDir.appendingPathComponent("model.safetensors"))
         return fixtureDir
     }
