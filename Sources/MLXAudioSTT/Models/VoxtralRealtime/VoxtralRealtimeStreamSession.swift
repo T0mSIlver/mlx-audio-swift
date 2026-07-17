@@ -166,7 +166,10 @@ public final class VoxtralRealtimeStreamSession {
         // re-allocated cold from the Metal driver 10x/s in live streaming and defeats
         // any `Memory.cacheLimit` the host process sets. Match the offline `generate`
         // loop instead: clear every 256 decoded tokens (see `decode`), plus once when
-        // the utterance finishes to trim decode transients. Note this final clear
+        // `finish()` flushes the tail to trim decode transients (an utterance that
+        // ends by EOS mid-stream never reaches this clear — `finish()` returns early
+        // via the `done` guard; the caller-side contract below covers it). Note this
+        // final clear
         // CANNOT return the process to the weight floor by itself: the session's KV
         // caches and carried front-end state are still live here and fall into the
         // pool when the caller releases the session. A host that wants idle memory
