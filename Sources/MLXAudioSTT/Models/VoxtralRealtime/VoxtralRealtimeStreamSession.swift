@@ -216,13 +216,20 @@ public final class VoxtralRealtimeStreamSession {
         freezeEncoderState()
 
         guard let adapter = adapterBuf else {
-            Memory.clearCache()
             return Delta(text: "", tokenIds: [])
         }
         prefillIfNeeded(adapter: adapter)
         let delta = decode(adapter: adapter, upTo: min(emitLimit, adapter.shape[0]))
 
-        Memory.clearCache()
+        // Per-step clears re-allocate the working set cold 10x/s and defeat the
+        // host's `Memory.cacheLimit`. Match the offline `generate` loop instead:
+        // clear every 256 decoded tokens (see `decode`) plus once on the finish()
+        // flush. The session's KV caches and carried state are still live here, so
+        // a host that wants idle memory back at the weight floor must clear again
+        // after releasing the session.
+        if final {
+            Memory.clearCache()
+        }
         return delta
     }
 
@@ -291,6 +298,10 @@ public final class VoxtralRealtimeStreamSession {
             lastLogits = model.decoder.logits(next.0[0])
             decPos += 1
             MLX.eval(lastLogits!)
+            // Same cadence as the offline `generate` loop.
+            if generated.count % 256 == 0 {
+                Memory.clearCache()
+            }
         }
 
         let textSoFar = model.decodeStreaming(generated)
