@@ -169,8 +169,12 @@ struct VoxtralRealtimeMelStream {
         hopLength: Int = 160,
         globalLogMelMax: Float = 1.5
     ) {
+        // The offline leading reflect pad mirrors stream indices 1...windowSize/2,
+        // so zero-seeding is exact only when the left pad strictly exceeds
+        // windowSize/2 (at exactly windowSize/2 the mirror reads the first real
+        // sample).
         precondition(
-            leftPadSamples >= windowSize / 2,
+            leftPadSamples > windowSize / 2,
             "left pad must cover the reflect pad for the zero-seeded carry to be exact"
         )
         self.melFilters = melFilters

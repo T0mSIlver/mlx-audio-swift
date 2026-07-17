@@ -302,7 +302,7 @@ final class VoxtralRealtimeAudioEncoder: Module {
     ///     count, 2 after an odd one), so the downsampling phase matches the offline
     ///     conv for arbitrary chunk sizes. Seeded with the causal zero pad row.
     ///
-    /// `convStem`'s trailing `% downsampleFactor` truncation is not replicated here:
+    /// `convStem`'s leading `% downsampleFactor` truncation is not replicated here:
     /// the streaming session only ever frames whole-token (1280-sample-aligned) padded
     /// streams, for which the mel column count is even and the truncation is a no-op.
     func convStemStep(_ mel: MLXArray, state: inout VoxtralRealtimeConvStemState) -> MLXArray {
