@@ -166,8 +166,13 @@ public final class VoxtralRealtimeStreamSession {
         // re-allocated cold from the Metal driver 10x/s in live streaming and defeats
         // any `Memory.cacheLimit` the host process sets. Match the offline `generate`
         // loop instead: clear every 256 decoded tokens (see `decode`), plus once when
-        // the utterance finishes so memory returns to the weight floor between
-        // sessions. Callers that need a hard bound set `Memory.cacheLimit`.
+        // the utterance finishes to trim decode transients. Note this final clear
+        // CANNOT return the process to the weight floor by itself: the session's KV
+        // caches and carried front-end state are still live here and fall into the
+        // pool when the caller releases the session. A host that wants idle memory
+        // back at the weight floor between utterances must call `Memory.clearCache()`
+        // again AFTER releasing the session. Callers that need a hard bound set
+        // `Memory.cacheLimit`.
         if final {
             Memory.clearCache()
         }
