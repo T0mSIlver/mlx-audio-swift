@@ -287,24 +287,16 @@ final class VoxtralRealtimeAudioEncoder: Module {
         return x
     }
 
-    /// Incremental counterpart of `convStem`: consume the new mel columns
-    /// (`[nMels, nNew]`, the `computeMelSpectrogram` layout) and return every conv-stem
-    /// row (`[nNewRows, dim]`) they complete, bit-identical to the rows `convStem`
-    /// produces at the same absolute indices over the full mel.
-    ///
-    /// Both convolutions are causal (`VoxtralRealtimeCausalConv1d` left-pads with
-    /// zeros), so a row is exact as soon as its input window is exact:
-    ///   * conv1 (k=3, stride 1) — `state.conv1Carry` holds the last
-    ///     `kernel - stride = 2` cast input frames; the next output row's window
-    ///     starts exactly there. Seeded with the causal zero pad on the first call.
-    ///   * conv2 (k=3, stride 2) — `state.conv2Carry` holds the input suffix from the
-    ///     start of the next stride-2 window (1 frame after an even total input
-    ///     count, 2 after an odd one), so the downsampling phase matches the offline
-    ///     conv for arbitrary chunk sizes. Seeded with the causal zero pad row.
-    ///
-    /// `convStem`'s leading `% downsampleFactor` truncation is not replicated here:
-    /// the streaming session only ever frames whole-token (1280-sample-aligned) padded
-    /// streams, for which the mel column count is even and the truncation is a no-op.
+    /// Incremental counterpart of `convStem`: consume new mel columns
+    /// (`[nMels, nNew]`) and return every conv-stem row (`[nNewRows, dim]`) they
+    /// complete, matching the rows `convStem` produces at the same absolute indices.
+    /// Both convs are causal (zero left-pad), so a row is exact once its input
+    /// window is exact: conv1 (k3 s1) carries its last 2 cast input frames; conv2
+    /// (k3 s2) carries the suffix from the start of the next stride-2 window
+    /// (1 frame after an even total input count, 2 after odd), keeping the
+    /// downsample phase aligned for arbitrary chunk sizes. `convStem`'s leading
+    /// `% downsampleFactor` truncation is a no-op for the session's whole-token
+    /// streams and is not replicated.
     func convStemStep(_ mel: MLXArray, state: inout VoxtralRealtimeConvStemState) -> MLXArray {
         let dtype = convLayers0Conv.conv.weight.dtype
         guard mel.shape[1] > 0 else { return MLXArray.zeros([0, config.dim], type: Float.self).asType(dtype) }

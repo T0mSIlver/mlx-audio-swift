@@ -14,9 +14,8 @@ import MLXAudioCore
 //   * the mel/conv front end runs incrementally with carried tails
 //     (`VoxtralRealtimeMelStream` + `convStemStep`): mel windows are emitted only
 //     once complete and both convs are causal, so every produced row is final and
-//     bit-identical to the offline full encode at the same absolute index. Only
-//     whole-token rows below the freeze point are fed onward; the trailing partial
-//     token (chunk ended mid-1280-sample-token) is guarded by `frozenGuardTokens`.
+//     matches the offline full encode at the same absolute index. The trailing
+//     partial token is guarded by `frozenGuardTokens`.
 //   * RoPE attention is relative-position invariant, so feeding conv frames in
 //     sliding-window-aligned blocks with the cache RESET at each boundary reproduces
 //     `encodeChunked` (>sw) exactly; a single un-reset block reproduces `encodeFull`
@@ -80,10 +79,8 @@ public final class VoxtralRealtimeStreamSession {
     // Only the trailing partial token (chunk ended mid-1280-sample-token) is unfrozen.
     private let frozenGuardTokens = 1
 
-    // Incremental front-end state. `melStream` carries the not-yet-framed sample
-    // tail, `convState` the causal-conv tails, and `convRows` every conv-stem row
-    // produced so far (all final — see the correctness notes above). `flushed`
-    // means `finish()` sealed the stream by appending the offline right-pad.
+    // Incremental front-end state; all rows are final (see the header notes).
+    // `flushed` means `finish()` sealed the stream by appending the offline right-pad.
     private var pendingSamples: [Float] = []
     private var realSamplesFed = 0
     private var melStream: VoxtralRealtimeMelStream?
@@ -179,10 +176,8 @@ public final class VoxtralRealtimeStreamSession {
         }
 
         // Move new audio into the mel stream — plus, on finish, the exact right-pad
-        // `prepareMel` would append (token alignment + `(nDelay + 1) + 10` tokens of
-        // zeros) and the trailing reflect-pad samples. Only final data enters carried
-        // state: mel windows are emitted once complete, so the still-growing stream
-        // end is never cached, only re-covered by the retained sample tail.
+        // `prepareMel` would append (token alignment + `(nDelay + 1) + 10` zero
+        // tokens) and the trailing reflect-pad samples.
         var newSamples = pendingSamples
         pendingSamples.removeAll(keepingCapacity: true)
         realSamplesFed += newSamples.count
@@ -205,11 +200,10 @@ public final class VoxtralRealtimeStreamSession {
         }
         let convRowCount = convRows?.shape[0] ?? 0
 
-        // Emit ceiling: with audio still arriving, the whole-token span covered by
-        // real samples minus the trailing partial-token guard. The offline path's
-        // `min(nAudioTotal, …)` clamp can never bind before finish — its right-pad
-        // always spans ≥ 11 extra tokens past `realRegion`. After the final pad,
-        // every produced row is decodable (`nAudioTotal` == total rows / ds).
+        // Emit ceiling: the whole-token span covered by real samples minus the
+        // trailing partial-token guard. The offline `min(nAudioTotal, …)` clamp can
+        // never bind before finish (the right-pad spans ≥ 11 tokens past `realRegion`);
+        // after the final pad every produced row is decodable.
         let realRegion = model.config.nLeftPadTokens + model.numAudioTokens(realSamplesFed)
         let emitLimit = final ? convRowCount / ds : max(0, realRegion - frozenGuardTokens)
         let convFreeze = min(convRowCount / ds, emitLimit) * ds

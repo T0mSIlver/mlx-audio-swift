@@ -73,10 +73,8 @@ enum VoxtralRealtimeAudio {
     }
 
     /// Spectral tail of `computeMelSpectrogram` (Hann window → power spectrum → mel →
-    /// log-normalize), operating on already-framed samples so the streaming
-    /// `VoxtralRealtimeMelStream` can run it over incrementally framed windows. Kept
-    /// operation-for-operation identical to the offline function, which frames per row
-    /// independently — identical window contents therefore produce identical columns.
+    /// log-normalize) over already-framed samples, kept operation-for-operation
+    /// identical so identical window contents produce identical columns.
     /// `frames` is `[nFrames, windowSize]`; returns `[nMels, nFrames]`.
     static func melColumns(
         frames: MLXArray,
@@ -133,25 +131,17 @@ enum VoxtralRealtimeAudio {
     }
 }
 
-/// Incremental counterpart of `VoxtralRealtimeAudio.computeMelSpectrogram` for the
-/// streaming session: O(chunk) work per call instead of reframing the whole stream.
+/// Incremental counterpart of `VoxtralRealtimeAudio.computeMelSpectrogram`:
+/// O(chunk) work per call instead of reframing the whole stream, reproducing the
+/// offline frames by carrying the not-yet-framed sample suffix between calls.
 ///
-/// The offline path reflect-pads the (already zero-padded) sample stream by
-/// `windowSize / 2` on both sides, frames it at `hopLength`, and drops the last frame —
-/// so frame `t` covers stream samples `[t*hop - window/2, t*hop - window/2 + window)`.
-/// This type reproduces those frames bit-for-bit by carrying the not-yet-framed suffix
-/// of the stream between calls:
-///   * The stream always begins with the session's `nLeftPadTokens` of zero samples
-///     (`>= window/2`), so the offline leading reflect pad is `window/2` zeros — the
-///     carry is seeded with exactly those.
-///   * A frame is emitted only once its full window is buffered, so every emitted
-///     frame is final: later audio can never land inside an already-emitted window.
-///   * The stream always ends with `>= window` zero samples (the offline right-pad),
-///     so the offline trailing reflect pad is zeros too; of it, only the
-///     `window - hop - window/2` samples past the stream end are ever read by kept
-///     frames (the offline path drops the final frame). `finishTailPadCount` is that
-///     count — the session appends that many zeros after the right-pad on `finish()`,
-///     after which the emitted frame count equals the offline count exactly.
+/// Offline, frame `t` covers stream samples `[t*hop - window/2, t*hop + window/2)`
+/// and both reflect pads reduce to zeros under the session's own zero padding, so
+/// the carry seeds with `window/2` zeros and a frame is emitted only once its full
+/// window is buffered — later audio can never land in an already-emitted window.
+/// Appending `finishTailPadCount` zeros on `finish()` (the only right-reflect
+/// samples kept frames ever read; offline drops its final frame) makes the emitted
+/// frame count match the offline count exactly.
 struct VoxtralRealtimeMelStream {
     private let melFilters: MLXArray
     private let windowSize: Int
@@ -169,10 +159,8 @@ struct VoxtralRealtimeMelStream {
         hopLength: Int = 160,
         globalLogMelMax: Float = 1.5
     ) {
-        // The offline leading reflect pad mirrors stream indices 1...windowSize/2,
-        // so zero-seeding is exact only when the left pad strictly exceeds
-        // windowSize/2 (at exactly windowSize/2 the mirror reads the first real
-        // sample).
+        // The leading reflect pad mirrors stream indices 1...window/2, so zero-
+        // seeding is exact only when the left pad strictly exceeds window/2.
         precondition(
             leftPadSamples > windowSize / 2,
             "left pad must cover the reflect pad for the zero-seeded carry to be exact"
@@ -181,13 +169,11 @@ struct VoxtralRealtimeMelStream {
         self.windowSize = windowSize
         self.hopLength = hopLength
         self.globalLogMelMax = globalLogMelMax
-        // Leading reflect pad (window/2 zeros, since the stream starts with zeros)
-        // followed by the stream's left-pad zeros.
+        // window/2 reflect-pad zeros + the stream's left-pad zeros.
         self.carry = [Float](repeating: 0, count: windowSize / 2 + leftPadSamples)
     }
 
-    /// Zero samples the offline path reads past the end of the stream (from the
-    /// trailing reflect pad of the zero right-pad). Append on `finish()` only.
+    /// Zero samples the offline path reads past the stream end; append on `finish()` only.
     var finishTailPadCount: Int { windowSize - hopLength - windowSize / 2 }
 
     /// Ingest new stream samples and return the mel columns (`[nMels, nNewFrames]`)
