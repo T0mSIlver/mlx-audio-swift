@@ -8,6 +8,14 @@ struct VoxtralRealtimeEncoderKVCache {
     var positionOffset: Int
 }
 
+/// Carried causal-conv state for the incremental conv stem — see `convStemStep`.
+/// `nil` means "not started": the first step seeds each carry with the causal
+/// zero left-pad the offline `VoxtralRealtimeCausalConv1d` would apply.
+struct VoxtralRealtimeConvStemState {
+    var conv1Carry: MLXArray? // [1, 2, nMels] — last two cast mel input frames
+    var conv2Carry: MLXArray? // [1, 1..2, dim] — conv1 output suffix from the next stride-2 window
+}
+
 func voxtralComputeRopeFrequencies(
     positions: MLXArray,
     headDim: Int,
@@ -277,6 +285,54 @@ final class VoxtralRealtimeAudioEncoder: Module {
         }
 
         return x
+    }
+
+    /// Incremental counterpart of `convStem`: consume the new mel columns
+    /// (`[nMels, nNew]`, the `computeMelSpectrogram` layout) and return every conv-stem
+    /// row (`[nNewRows, dim]`) they complete, bit-identical to the rows `convStem`
+    /// produces at the same absolute indices over the full mel.
+    ///
+    /// Both convolutions are causal (`VoxtralRealtimeCausalConv1d` left-pads with
+    /// zeros), so a row is exact as soon as its input window is exact:
+    ///   * conv1 (k=3, stride 1) — `state.conv1Carry` holds the last
+    ///     `kernel - stride = 2` cast input frames; the next output row's window
+    ///     starts exactly there. Seeded with the causal zero pad on the first call.
+    ///   * conv2 (k=3, stride 2) — `state.conv2Carry` holds the input suffix from the
+    ///     start of the next stride-2 window (1 frame after an even total input
+    ///     count, 2 after an odd one), so the downsampling phase matches the offline
+    ///     conv for arbitrary chunk sizes. Seeded with the causal zero pad row.
+    ///
+    /// `convStem`'s trailing `% downsampleFactor` truncation is not replicated here:
+    /// the streaming session only ever frames whole-token (1280-sample-aligned) padded
+    /// streams, for which the mel column count is even and the truncation is a no-op.
+    func convStemStep(_ mel: MLXArray, state: inout VoxtralRealtimeConvStemState) -> MLXArray {
+        let dtype = convLayers0Conv.conv.weight.dtype
+        guard mel.shape[1] > 0 else { return MLXArray.zeros([0, config.dim], type: Float.self).asType(dtype) }
+
+        // Same cast + layout as `convStem`: [1, nNew, nMels].
+        let x = mel.asType(dtype).transposed(1, 0).expandedDimensions(axis: 0)
+
+        let pad1 = convLayers0Conv.padding
+        let carry1 = state.conv1Carry
+            ?? MLXArray.zeros([1, pad1, x.shape[2]], type: Float.self).asType(dtype)
+        let in1 = MLX.concatenated([carry1, x], axis: 1)
+        state.conv1Carry = in1[0..., (in1.shape[1] - pad1)..., 0...]
+        let h = gelu(convLayers0Conv.conv(in1)) // stride 1 ⇒ one row per new mel column
+
+        let pad2 = convLayers1Conv.padding
+        let carry2 = state.conv2Carry
+            ?? MLXArray.zeros([1, pad2, h.shape[2]], type: Float.self).asType(dtype)
+        let in2 = MLX.concatenated([carry2, h], axis: 1)
+        let kernel = convLayers1Conv.kernelSize
+        let stride = convLayers1Conv.stride
+        let newRows = in2.shape[1] >= kernel ? (in2.shape[1] - kernel) / stride + 1 : 0
+        state.conv2Carry = in2[0..., (newRows * stride)..., 0...]
+        guard newRows > 0 else { return MLXArray.zeros([0, config.dim], type: Float.self).asType(dtype) }
+
+        // The valid (unpadded) conv over `in2` yields exactly `newRows` rows; the
+        // 1–2 trailing frames it cannot window are what `conv2Carry` re-presents
+        // to the next call.
+        return gelu(convLayers1Conv.conv(in2)).squeezed(axis: 0)
     }
 
     func encodeFull(_ convOut: MLXArray) -> MLXArray {
