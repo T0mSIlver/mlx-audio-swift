@@ -162,20 +162,12 @@ public final class VoxtralRealtimeStreamSession {
         prefillIfNeeded(adapter: adapter)
         let delta = decode(adapter: adapter, upTo: min(emitLimit, adapter.shape[0]))
 
-        // Clearing the buffer pool every step forces the whole working set to be
-        // re-allocated cold from the Metal driver 10x/s in live streaming and defeats
-        // any `Memory.cacheLimit` the host process sets. Match the offline `generate`
-        // loop instead: clear every 256 decoded tokens (see `decode`), plus once when
-        // `finish()` flushes the tail to trim decode transients (an utterance that
-        // ends by EOS mid-stream never reaches this clear — `finish()` returns early
-        // via the `done` guard; the caller-side contract below covers it). Note this
-        // final clear
-        // CANNOT return the process to the weight floor by itself: the session's KV
-        // caches and carried front-end state are still live here and fall into the
-        // pool when the caller releases the session. A host that wants idle memory
-        // back at the weight floor between utterances must call `Memory.clearCache()`
-        // again AFTER releasing the session. Callers that need a hard bound set
-        // `Memory.cacheLimit`.
+        // Per-step clears re-allocate the working set cold 10x/s and defeat the
+        // host's `Memory.cacheLimit`. Match the offline `generate` loop instead:
+        // clear every 256 decoded tokens (see `decode`) plus once on the finish()
+        // flush. The session's KV caches and carried state are still live here, so
+        // a host that wants idle memory back at the weight floor must clear again
+        // after releasing the session.
         if final {
             Memory.clearCache()
         }
