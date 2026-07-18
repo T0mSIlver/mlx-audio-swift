@@ -80,7 +80,7 @@ final class VoxtralRealtimeDecoderAttention: Module {
     /// launches per decoded token. The operations are unchanged, so the tables
     /// (and therefore the layer outputs) are bit-identical to the previous
     /// per-layer construction.
-    static func ropeFrequencies(
+    fileprivate static func ropeFrequencies(
         positions: MLXArray,
         headDim: Int,
         ropeTheta: Float

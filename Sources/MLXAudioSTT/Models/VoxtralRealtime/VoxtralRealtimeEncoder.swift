@@ -115,7 +115,9 @@ struct VoxtralRealtimeEncoderAttentionInputs {
     /// or all `nil`, for a cache-less pass). One mask can serve every layer
     /// because the encoder always advances its layer caches in lockstep — they
     /// are created, extended, trimmed, and reset together — which is asserted
-    /// here. `dtype` is the activation (q/k) dtype the mask must match.
+    /// here. `dtype` is the activation (q/k) dtype the mask must match; passing
+    /// the encoder input dtype relies on every layer's q/k projections
+    /// preserving it, which holds for the uniform-precision `Linear` weights.
     static func build(
         positions: MLXArray,
         seqLen: Int,
@@ -131,12 +133,17 @@ struct VoxtralRealtimeEncoderAttentionInputs {
             theta: ropeTheta
         )
 
+        // `caches.first ?? nil` collapses "no caches" and "[nil, ...]" into one
+        // cache-less case. Nil-ness must also be uniform across layers: a
+        // present-but-empty cache selects the explicit-array mask branch below,
+        // while a nil cache can take the `.causal` branch.
         let cache = caches.first ?? nil
         let cachedLen = cache?.keys.shape[0] ?? 0
         let cachedOffset = cache?.positionOffset ?? 0
         precondition(
             caches.allSatisfy {
-                ($0?.keys.shape[0] ?? 0) == cachedLen
+                ($0 == nil) == (cache == nil)
+                    && ($0?.keys.shape[0] ?? 0) == cachedLen
                     && ($0?.positionOffset ?? 0) == cachedOffset
             },
             "encoder layer caches must advance in lockstep to share one attention mask"
@@ -441,6 +448,8 @@ final class VoxtralRealtimeAudioEncoder: Module {
             let chunkEnd = min(chunkStart + sw, seqLen)
             var x = convOut[chunkStart..<chunkEnd, 0...]
             let positions = MLXArray(chunkStart..<chunkEnd).asType(.int32)
+            // Per-chunk, not per-pass: the caches' offset/history advance between
+            // chunks, so these inputs cannot be hoisted out of this loop.
             let inputs = attentionInputs(
                 positions: positions, seqLen: chunkEnd - chunkStart, caches: caches,
                 dtype: x.dtype)
