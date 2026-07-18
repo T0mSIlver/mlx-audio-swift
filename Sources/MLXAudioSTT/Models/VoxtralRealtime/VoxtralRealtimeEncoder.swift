@@ -92,32 +92,21 @@ final class VoxtralRealtimeCausalConv1d: Module {
     }
 }
 
-/// Attention inputs that are identical for every transformer layer of a single
-/// encoder forward pass: the interleaved-RoPE cos/sin tables for `positions` and
-/// the scaled-dot-product-attention mask.
-///
-/// The per-layer attention used to rebuild these from scratch — `nLayers` copies
-/// of the same ~15 tiny kernels per pass. For the realtime streaming session the
-/// encoder runs every audio chunk over only a handful of new frames, so those
-/// redundant launches (not bandwidth) dominate encoder step time. The caller now
-/// builds the shared inputs once per pass and every layer reuses them. The values
-/// are produced by exactly the same operations as before, in the same order, so
-/// every layer output is bit-identical to the per-layer construction.
+/// Attention inputs identical for every transformer layer of one encoder forward
+/// pass: the interleaved-RoPE cos/sin tables for `positions` and the SDPA mask.
+/// Built once per pass instead of per layer — same operations, so layer outputs
+/// are bit-identical; only the `nLayers` redundant kernel launches go away (which
+/// dominate streaming encoder steps, where each pass covers a few new frames).
 struct VoxtralRealtimeEncoderAttentionInputs {
     let ropeCos: MLXArray
     let ropeSin: MLXArray
     let mask: MLXFast.ScaledDotProductAttentionMaskMode
 
     /// Build the shared inputs for one forward pass of `seqLen` frames at
-    /// `positions`.
-    ///
-    /// `caches` are the per-layer KV-caches this pass is about to extend (empty,
-    /// or all `nil`, for a cache-less pass). One mask can serve every layer
-    /// because the encoder always advances its layer caches in lockstep — they
-    /// are created, extended, trimmed, and reset together — which is asserted
-    /// here. `dtype` is the activation (q/k) dtype the mask must match; passing
-    /// the encoder input dtype relies on every layer's q/k projections
-    /// preserving it, which holds for the uniform-precision `Linear` weights.
+    /// `positions`, extending `caches`. One mask can serve every layer because the
+    /// encoder always advances its layer caches in lockstep (created, extended,
+    /// trimmed, and reset together — asserted here). `dtype` is the q/k dtype the
+    /// mask must match; the uniform-precision projections preserve the input dtype.
     static func build(
         positions: MLXArray,
         seqLen: Int,
@@ -133,10 +122,9 @@ struct VoxtralRealtimeEncoderAttentionInputs {
             theta: ropeTheta
         )
 
-        // `caches.first ?? nil` collapses "no caches" and "[nil, ...]" into one
-        // cache-less case. Nil-ness must also be uniform across layers: a
-        // present-but-empty cache selects the explicit-array mask branch below,
-        // while a nil cache can take the `.causal` branch.
+        // Collapses "no caches" and "[nil, ...]" into one cache-less case. Nil-ness
+        // must be uniform across layers: nil and present-but-empty caches select
+        // different mask branches below.
         let cache = caches.first ?? nil
         let cachedLen = cache?.keys.shape[0] ?? 0
         let cachedOffset = cache?.positionOffset ?? 0

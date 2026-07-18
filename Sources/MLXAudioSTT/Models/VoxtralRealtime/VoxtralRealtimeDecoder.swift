@@ -72,14 +72,10 @@ final class VoxtralRealtimeDecoderAttention: Module {
 
     }
 
-    /// Interleaved-RoPE cos/sin tables for `positions`.
-    ///
-    /// Every decoder layer rotates by the same tables, so the decoder computes
-    /// them once per forward pass and hands them to each layer — rebuilding them
-    /// inside all `nLayers` attentions cost hundreds of identical tiny kernel
-    /// launches per decoded token. The operations are unchanged, so the tables
-    /// (and therefore the layer outputs) are bit-identical to the previous
-    /// per-layer construction.
+    /// Interleaved-RoPE cos/sin tables for `positions`. Every decoder layer rotates
+    /// by the same tables, so the decoder builds them once per forward pass instead
+    /// of once per layer — same operations, bit-identical outputs, `nLayers`× fewer
+    /// tiny kernel launches per decoded token.
     fileprivate static func ropeFrequencies(
         positions: MLXArray,
         headDim: Int,
