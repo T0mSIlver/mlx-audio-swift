@@ -83,6 +83,21 @@ struct VoxtralRealtimeStreamingFrontEndTests {
         MLX.abs(a - b).max().item(Float.self)
     }
 
+    @Test func encoderAttentionMaskSelectionUsesFusedModesForRetainedQuerySuffix() {
+        let slidingWindow = 64
+
+        #expect(VoxtralRealtimeEncoderAttentionInputs.maskKind(
+            seqLen: 1, kvLen: slidingWindow, slidingWindow: slidingWindow) == .none)
+        #expect(VoxtralRealtimeEncoderAttentionInputs.maskKind(
+            seqLen: slidingWindow, kvLen: slidingWindow, slidingWindow: slidingWindow) == .causal)
+        #expect(VoxtralRealtimeEncoderAttentionInputs.maskKind(
+            seqLen: 16, kvLen: slidingWindow, slidingWindow: slidingWindow) == .causal)
+        #expect(VoxtralRealtimeEncoderAttentionInputs.maskKind(
+            seqLen: slidingWindow + 1, kvLen: slidingWindow, slidingWindow: slidingWindow) == .array)
+        #expect(VoxtralRealtimeEncoderAttentionInputs.maskKind(
+            seqLen: 16, kvLen: slidingWindow + 1, slidingWindow: slidingWindow) == .array)
+    }
+
     @Test func melStreamMatchesOfflineAcrossIrregularChunks() {
         let filters = VoxtralRealtimeAudio.computeMelFilters().asType(.float32)
         let real = Self.sweep(41_337)

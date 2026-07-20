@@ -101,12 +101,33 @@ final class VoxtralRealtimeCausalConv1d: Module {
 /// encoder runs every audio chunk over only a handful of new frames, so those
 /// redundant launches (not bandwidth) dominate encoder step time. The caller now
 /// builds the shared inputs once per pass and every layer reuses them. The values
-/// are produced by exactly the same operations as before, in the same order, so
-/// every layer output is bit-identical to the per-layer construction.
+/// are shared without changing q/k/v construction or layout.
+enum VoxtralRealtimeEncoderAttentionMaskKind: Equatable {
+    case none
+    case causal
+    case array
+}
+
 struct VoxtralRealtimeEncoderAttentionInputs {
     let ropeCos: MLXArray
     let ropeSin: MLXArray
     let mask: MLXFast.ScaledDotProductAttentionMaskMode
+
+    /// Queries are the newly appended suffix of the retained keys. The window
+    /// constraint is therefore redundant when every query key remains in that range.
+    static func maskKind(
+        seqLen: Int,
+        kvLen: Int,
+        slidingWindow: Int
+    ) -> VoxtralRealtimeEncoderAttentionMaskKind {
+        if seqLen == 1 {
+            return .none
+        }
+        if kvLen <= slidingWindow && seqLen <= kvLen {
+            return .causal
+        }
+        return .array
+    }
 
     /// Build the shared inputs for one forward pass of `seqLen` frames at
     /// `positions`.
@@ -152,11 +173,12 @@ struct VoxtralRealtimeEncoderAttentionInputs {
         }
 
         let maskMode: MLXFast.ScaledDotProductAttentionMaskMode
-        if seqLen == 1 {
+        switch maskKind(seqLen: seqLen, kvLen: kvLen, slidingWindow: slidingWindow) {
+        case .none:
             maskMode = .none
-        } else if cache == nil && seqLen <= slidingWindow {
+        case .causal:
             maskMode = .causal
-        } else {
+        case .array:
             let qPos = positions.expandedDimensions(axis: 1)
             let kPos = MLXArray(positionOffset..<(positionOffset + kvLen)).asType(.int32).expandedDimensions(axis: 0)
             let causal = kPos .<= qPos
