@@ -109,6 +109,49 @@ public final class VoxtralRealtimeStreamSession {
     private var generated: [Int] = []
     private var emittedText = ""
 
+    // SCRATCH-ONLY per-phase wall timers (never upstreamed). Sums are in ms over the
+    // current 50-step window; a "PHASE" line is printed and the window reset every
+    // 50 advance() calls. dec_layers/dec_logits are split by an EXTRA eval between
+    // the decoder layers and the logits matmul — that extra sync slightly perturbs
+    // absolute step time but attributes GPU time within the decode loop.
+    private struct PhaseWindow {
+        var feBuild = 0.0      // mel append + conv stem graph build
+        var encBuild = 0.0     // feedIncremental + downsampleAndProject graph build
+        var freezeEval = 0.0   // MLX.eval of conv rows/tails + adapter + enc caches
+        var decBuild = 0.0     // per-token embed + decoder-layer graph build
+        var decLayersEval = 0.0 // eval(hidden) — decoder layers GPU time
+        var decLogitsEval = 0.0 // logits matmul graph + eval — lm-head GPU time
+        var sample = 0.0       // argmax + item() sync
+        var detok = 0.0        // decodeStreaming
+        var stepTotal = 0.0    // whole advance() body
+        var tokens = 0
+        var steps = 0
+    }
+    private var phaseWindow = PhaseWindow()
+    private let phaseClock = ContinuousClock()
+
+    private func phaseMs(since start: ContinuousClock.Instant) -> Double {
+        let c = (phaseClock.now - start).components
+        return Double(c.seconds) * 1_000 + Double(c.attoseconds) / 1e15
+    }
+
+    private func phaseFlushIfNeeded() {
+        guard phaseWindow.steps >= 50 else { return }
+        let w = phaseWindow
+        let n = Double(w.steps)
+        let accounted = w.feBuild + w.encBuild + w.freezeEval + w.decBuild
+            + w.decLayersEval + w.decLogitsEval + w.sample + w.detok
+        print(String(
+            format: "PHASE steps=%d tokens=%d step_ms=%.2f fe_build=%.2f enc_build=%.2f "
+                + "freeze_eval=%.2f dec_build=%.2f dec_layers=%.2f dec_logits=%.2f "
+                + "sample=%.2f detok=%.2f other=%.2f",
+            w.steps, w.tokens, w.stepTotal / n, w.feBuild / n, w.encBuild / n,
+            w.freezeEval / n, w.decBuild / n, w.decLayersEval / n, w.decLogitsEval / n,
+            w.sample / n, w.detok / n, (w.stepTotal - accounted) / n
+        ))
+        phaseWindow = PhaseWindow()
+    }
+
     public init(
         model: VoxtralRealtimeModel,
         temperature: Float = 0.0,
@@ -188,6 +231,7 @@ public final class VoxtralRealtimeStreamSession {
         // zeros) and the trailing reflect-pad samples. Only final data enters carried
         // state: mel windows are emitted once complete, so the still-growing stream
         // end is never cached, only re-covered by the retained sample tail.
+        let tStep = phaseClock.now
         var newSamples = pendingSamples
         pendingSamples.removeAll(keepingCapacity: true)
         realSamplesFed += newSamples.count
@@ -201,6 +245,7 @@ public final class VoxtralRealtimeStreamSession {
             flushed = true
         }
 
+        let tFE = phaseClock.now
         let newMel = melStream!.append(newSamples)
         if newMel.shape[1] > 0 {
             let rows = model.encoder.convStemStep(newMel, state: &convState)
@@ -208,6 +253,7 @@ public final class VoxtralRealtimeStreamSession {
                 convRows = convRows == nil ? rows : MLX.concatenated([convRows!, rows], axis: 0)
             }
         }
+        phaseWindow.feBuild += phaseMs(since: tFE)
         let convRowCount = convRows?.shape[0] ?? 0
 
         // Emit ceiling: with audio still arriving, the whole-token span covered by
@@ -219,18 +265,28 @@ public final class VoxtralRealtimeStreamSession {
         let emitLimit = final ? convRowCount / ds : max(0, realRegion - frozenGuardTokens)
         let convFreeze = min(convRowCount / ds, emitLimit) * ds
 
+        let tEnc = phaseClock.now
         if convFreeze > encState.consumed, let convRows {
             let newEnc = model.encoder.feedIncremental(convRows, upTo: convFreeze, state: &encState)
             let rows = model.encoder.downsampleAndProject(newEnc)   // multiple-of-ds ⇒ whole rows
             adapterBuf = adapterBuf == nil ? rows : MLX.concatenated([adapterBuf!, rows], axis: 0)
         }
+        phaseWindow.encBuild += phaseMs(since: tEnc)
+        let tFreeze = phaseClock.now
         freezeEncoderState()
+        phaseWindow.freezeEval += phaseMs(since: tFreeze)
 
         guard let adapter = adapterBuf else {
+            phaseWindow.stepTotal += phaseMs(since: tStep)
+            phaseWindow.steps += 1
+            phaseFlushIfNeeded()
             return Delta(text: "", tokenIds: [])
         }
         prefillIfNeeded(adapter: adapter)
         let delta = decode(adapter: adapter, upTo: min(emitLimit, adapter.shape[0]))
+        phaseWindow.stepTotal += phaseMs(since: tStep)
+        phaseWindow.steps += 1
+        phaseFlushIfNeeded()
 
         // Clearing the buffer pool every step forces the whole working set to be
         // re-allocated cold from the Metal driver 10x/s in live streaming and defeats
@@ -264,6 +320,8 @@ public final class VoxtralRealtimeStreamSession {
 
     private func prefillIfNeeded(adapter: MLXArray) {
         guard !prefilled, adapter.shape[0] >= promptLength else { return }
+        let tPrefill = phaseClock.now
+        defer { print(String(format: "PHASE prefill_ms=%.2f", phaseMs(since: tPrefill))) }
 
         let nLeft = model.config.nLeftPadTokens
         let nDelay = promptLength - 1 - nLeft
@@ -297,7 +355,11 @@ public final class VoxtralRealtimeStreamSession {
         // step's return.
         while decPos < emitLimit {
             guard let pending = pendingSample else { break }
+            // SCRATCH: under the one-token-lag pipeline `sample` measures the wait for
+            // the previously scheduled scalar — i.e. GPU work NOT hidden by the gap.
+            let tSample = phaseClock.now
             let token = pending.item(Int.self)
+            phaseWindow.sample += phaseMs(since: tSample)
             generated.append(token)
 
             if token == model.config.eosTokenId || generated.count > maxTokens {
@@ -306,7 +368,9 @@ public final class VoxtralRealtimeStreamSession {
                 break
             }
             newIds.append(token)
+            phaseWindow.tokens += 1
 
+            let tBuild = phaseClock.now
             let tokenEmbed = model.decoder.embedToken(tokenId: token)
             let inputEmbed = decPos < adapter.shape[0]
                 ? adapter[decPos] + tokenEmbed
@@ -317,12 +381,16 @@ public final class VoxtralRealtimeStreamSession {
                 cache: decCache
             )
             decCache = next.1
+            // SCRATCH: no dec_layers/dec_logits split here — forcing an eval inside
+            // the loop would serialize exactly the work the pipeline overlaps. Both
+            // fields print 0; the deferred GPU wait shows up in `sample` instead.
             let scalar = model.sampleScalar(
                 logits: model.decoder.logits(next.0[0]),
                 temperature: temperature
             )
             MLX.asyncEval(scalar)
             pendingSample = scalar
+            phaseWindow.decBuild += phaseMs(since: tBuild)
             decPos += 1
             // Same cadence as the offline `generate` loop.
             if generated.count % 256 == 0 {
@@ -330,7 +398,9 @@ public final class VoxtralRealtimeStreamSession {
             }
         }
 
+        let tDetok = phaseClock.now
         let textSoFar = model.decodeStreaming(generated)
+        phaseWindow.detok += phaseMs(since: tDetok)
         let delta: String
         if textSoFar.hasPrefix(emittedText) {
             delta = String(textSoFar.dropFirst(emittedText.count))
