@@ -268,9 +268,12 @@ final class VoxtralRealtimeDecoder: Module {
     func quantizeTiedHeadIfNeeded(groupSize: Int, bits: Int) {
         guard !(tokEmbeddings is QuantizedEmbedding) else { return }
         guard tokEmbeddings.weight.dim(-1) % groupSize == 0 else { return }
-        _tokEmbeddings.wrappedValue = QuantizedEmbedding(
-            tokEmbeddings, groupSize: groupSize, bits: bits
-        )
+        // Swap through the library's module-replacement machinery — ModuleInfo
+        // properties trap on direct post-init mutation. The default apply converts
+        // the Embedding via its Quantizable conformance (same QuantizedEmbedding).
+        quantize(model: self, groupSize: groupSize, bits: bits) { path, module in
+            path == "tok_embeddings" && module is Embedding
+        }
     }
 
     func embedToken(tokenId: Int) -> MLXArray {
