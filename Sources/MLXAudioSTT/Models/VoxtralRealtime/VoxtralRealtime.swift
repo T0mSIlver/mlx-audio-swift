@@ -531,6 +531,13 @@ public extension VoxtralRealtimeModel {
         }
 
         try model.update(parameters: ModuleParameters.unflattened(sanitized), verify: .all)
+        // The tied head ships fp16 in the serving checkpoints; quantize it in place
+        // to the checkpoint's own group/bits (see quantizeTiedHeadIfNeeded).
+        if let quantization = quantConfig.quantization {
+            model.decoder.quantizeTiedHeadIfNeeded(
+                groupSize: quantization.groupSize, bits: quantization.bits
+            )
+        }
         model.ensureAdaScales(transcriptionDelayMs: config.transcriptionDelayMs)
         eval(model)
 
@@ -646,9 +653,11 @@ public extension VoxtralRealtimeModel {
 
 private struct VoxtralQuantizationConfig: Decodable {
     let perLayerQuantization: BaseConfiguration.PerLayerQuantization?
+    let quantization: BaseConfiguration.Quantization?
 
     init(from decoder: Decoder) throws {
         let base = try? BaseConfiguration(from: decoder)
         self.perLayerQuantization = base?.perLayerQuantization
+        self.quantization = base?.quantization
     }
 }

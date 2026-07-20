@@ -255,8 +255,28 @@ final class VoxtralRealtimeDecoder: Module {
         adaScales = scales
     }
 
+    /// Quantize the tied embedding/LM head in place after the fp16 checkpoint loads.
+    ///
+    /// The serving checkpoints store `tok_embeddings` unquantized (their converter
+    /// skips embeddings), so every decoded token paid a 768 MiB fp16 gemv for the
+    /// logits row — the largest single phase of a live-streaming step. Converting
+    /// after load applies the same deterministic affine quantization a converted
+    /// checkpoint would carry (voxmlx has always served a quantized tied head), cuts
+    /// the head read to the quantized fast path, and drops the fp16 copy from
+    /// residency. Logits change within quantization error — real-model eval-gated,
+    /// not bit-identical.
+    func quantizeTiedHeadIfNeeded(groupSize: Int, bits: Int) {
+        guard !(tokEmbeddings is QuantizedEmbedding) else { return }
+        guard tokEmbeddings.weight.dim(-1) % groupSize == 0 else { return }
+        _tokEmbeddings.wrappedValue = QuantizedEmbedding(
+            tokEmbeddings, groupSize: groupSize, bits: bits
+        )
+    }
+
     func embedToken(tokenId: Int) -> MLXArray {
-        tokEmbeddings.weight[tokenId]
+        // Module lookup (not a raw `weight` row): the weight is bit-packed once the
+        // tied head is quantized, and the module dequantizes per-row.
+        tokEmbeddings(MLXArray([Int32(tokenId)])).squeezed(axis: 0)
     }
 
     func embedTokens(_ tokenIds: MLXArray) -> MLXArray {
@@ -296,6 +316,10 @@ final class VoxtralRealtimeDecoder: Module {
     }
 
     func logits(_ h: MLXArray) -> MLXArray {
-        MLX.matmul(h, tokEmbeddings.weight.transposed(1, 0))
+        // `asLinear` dispatches to the module's projection: a plain fp16 embedding
+        // reproduces the previous matmul(h, weight.T) exactly; a quantized tied head
+        // takes the quantized-matmul fast path. Callers pass a single hidden row, so
+        // lift to rank 2 for the projection and drop the batch axis after.
+        tokEmbeddings.asLinear(h.expandedDimensions(axis: 0)).squeezed(axis: 0)
     }
 }
