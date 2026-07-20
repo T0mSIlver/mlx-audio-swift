@@ -296,6 +296,13 @@ final class VoxtralRealtimeDecoder: Module {
     }
 
     func logits(_ h: MLXArray) -> MLXArray {
-        MLX.matmul(h, tokEmbeddings.weight.transposed(1, 0))
+        // Every caller passes a single hidden-state row, so the tied-head projection is
+        // W·h over the embedding's stored row-major layout — mathematically identical to
+        // h·Wᵀ but without rebuilding a lazy transpose of the 768 MiB fp16 weight in
+        // every decoded token's graph. In live streaming (an eval boundary per step,
+        // allocator under pressure) that per-token transpose node cost ~25 ms/token and
+        // a ~1.5 GB transient; the batch decode loop measured the same op at ~4.8 ms.
+        precondition(h.ndim == 1, "logits expects a single hidden-state row")
+        return MLX.matmul(tokEmbeddings.weight, h)
     }
 }
