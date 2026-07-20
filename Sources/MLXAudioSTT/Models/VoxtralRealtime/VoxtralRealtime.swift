@@ -640,10 +640,13 @@ public extension VoxtralRealtimeModel {
     }
 
     func shouldQuantize(path: String) -> Bool {
+        // tok_embeddings is deliberately absent: the loader's quantize pass is
+        // already gated on the checkpoint shipping "<path>.scales", so a checkpoint
+        // with a quantized tied head loads directly, while fp16-embedding
+        // checkpoints keep the load-time conversion (quantizeTiedHeadIfNeeded).
         let skipPatterns = [
             "norm",
             "ada_rms_norm",
-            "tok_embeddings",
             "conv_layers",
             "audio_language_projection",
         ]
