@@ -252,7 +252,9 @@ final class VoxtralRealtimeDecoder: Module {
     }
 
     func embedToken(tokenId: Int) -> MLXArray {
-        tokEmbeddings.weight[tokenId]
+        // Module lookup rather than a raw `weight` row: for a QuantizedEmbedding the
+        // weight is bit-packed and only the module's gather dequantizes it.
+        tokEmbeddings(MLXArray([Int32(tokenId)])).squeezed(axis: 0)
     }
 
     func embedTokens(_ tokenIds: MLXArray) -> MLXArray {
@@ -292,6 +294,10 @@ final class VoxtralRealtimeDecoder: Module {
     }
 
     func logits(_ h: MLXArray) -> MLXArray {
-        MLX.matmul(h, tokEmbeddings.weight.transposed(1, 0))
+        // `asLinear` dispatches to the module's tied projection: a plain embedding
+        // computes the same contraction as the previous matmul(h, weight.T), and a
+        // QuantizedEmbedding takes the quantized-matmul path. Callers pass a single
+        // hidden row, so lift to rank 2 for the projection and drop the batch axis.
+        tokEmbeddings.asLinear(h.expandedDimensions(axis: 0)).squeezed(axis: 0)
     }
 }
