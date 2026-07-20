@@ -68,6 +68,10 @@ struct VoxtralRealtimeDecoderKVCacheAppendPlan: Equatable {
 /// Order-preserving decoder cache with block-grown backing storage.
 /// `positionOffset` is the absolute position of storage row zero; the attention
 /// offset also includes the invisible prefix at the start of `windowRange`.
+///
+/// Reference type mutated by `append` — every caller threads it linearly
+/// (forward → append → next forward). A caller that stored an older reference
+/// would observe later appends, not a snapshot; no current path does.
 final class VoxtralRealtimeDecoderKVCache {
     private(set) var keys: MLXArray   // [capacity, n_kv_heads * head_dim]
     private(set) var values: MLXArray // [capacity, n_kv_heads * head_dim]
@@ -109,6 +113,9 @@ final class VoxtralRealtimeDecoderKVCache {
         )
 
         if let retained = plan.compactionRange {
+            // Self-overlapping ranges are safe because MLXArray subscript setters are
+            // functional: the RHS view captures the pre-assignment handle, so this
+            // reads old values even where source and destination overlap.
             keys[0..<retained.count] = keys[retained]
             values[0..<retained.count] = values[retained]
             count = retained.count
