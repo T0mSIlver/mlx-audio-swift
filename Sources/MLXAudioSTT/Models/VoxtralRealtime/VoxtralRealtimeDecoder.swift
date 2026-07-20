@@ -2,10 +2,141 @@ import Foundation
 import MLX
 import MLXNN
 
-struct VoxtralRealtimeDecoderKVCache {
-    var keys: MLXArray   // [kv_len, n_kv_heads * head_dim]
-    var values: MLXArray // [kv_len, n_kv_heads * head_dim]
-    var positionOffset: Int
+struct VoxtralRealtimeDecoderKVCacheAppendPlan: Equatable {
+    static let capacityBlock = 256
+
+    let compactionRange: Range<Int>?
+    let appendRange: Range<Int>
+    let capacity: Int
+    let count: Int
+    let positionOffset: Int
+    let windowRange: Range<Int>
+    let windowPositionOffset: Int
+    let requiresGrowth: Bool
+
+    static func make(
+        count: Int,
+        capacity: Int,
+        positionOffset: Int,
+        appendCount: Int,
+        slidingWindow: Int
+    ) -> Self {
+        precondition(count >= 0 && count <= capacity)
+        precondition(appendCount >= 0)
+        precondition(slidingWindow > 0)
+
+        let projectedCount = count + appendCount
+        let excessAfterAppend = max(0, projectedCount - slidingWindow)
+        // Let one block of invisible rows accumulate. If the storage fills first,
+        // reclaim that prefix instead of growing it again.
+        let shouldCompact = count > slidingWindow
+            && (projectedCount > capacity || excessAfterAppend > capacityBlock)
+        let compactionRange: Range<Int>? = shouldCompact
+            ? ((count - slidingWindow)..<count)
+            : nil
+        let droppedCount = compactionRange?.lowerBound ?? 0
+        let compactedCount = compactionRange?.count ?? count
+        let appendRange = compactedCount..<(compactedCount + appendCount)
+        let requiredCapacity = appendRange.upperBound
+        let requiresGrowth = requiredCapacity > capacity
+        let capacityAfterGrowth: Int
+        if requiresGrowth {
+            capacityAfterGrowth = max(
+                capacityBlock,
+                ((requiredCapacity + capacityBlock - 1) / capacityBlock) * capacityBlock
+            )
+        } else {
+            capacityAfterGrowth = capacity
+        }
+
+        let newCount = appendRange.upperBound
+        let windowStart = max(0, newCount - slidingWindow)
+        let newPositionOffset = positionOffset + droppedCount
+        return Self(
+            compactionRange: compactionRange,
+            appendRange: appendRange,
+            capacity: capacityAfterGrowth,
+            count: newCount,
+            positionOffset: newPositionOffset,
+            windowRange: windowStart..<newCount,
+            windowPositionOffset: newPositionOffset + windowStart,
+            requiresGrowth: requiresGrowth
+        )
+    }
+}
+
+/// Order-preserving decoder cache with block-grown backing storage.
+/// `positionOffset` is the absolute position of storage row zero; the attention
+/// offset also includes the invisible prefix at the start of `windowRange`.
+final class VoxtralRealtimeDecoderKVCache {
+    private(set) var keys: MLXArray   // [capacity, n_kv_heads * head_dim]
+    private(set) var values: MLXArray // [capacity, n_kv_heads * head_dim]
+    private(set) var count = 0
+    private(set) var positionOffset = 0 // absolute position of storage row zero
+
+    private let slidingWindow: Int
+
+    init(keys: MLXArray, values: MLXArray, slidingWindow: Int) {
+        precondition(keys.ndim == 2 && values.ndim == 2)
+        precondition(keys.shape == values.shape)
+
+        self.slidingWindow = slidingWindow
+        let initialCapacity = max(
+            VoxtralRealtimeDecoderKVCacheAppendPlan.capacityBlock,
+            ((keys.shape[0] + VoxtralRealtimeDecoderKVCacheAppendPlan.capacityBlock - 1)
+                / VoxtralRealtimeDecoderKVCacheAppendPlan.capacityBlock)
+                * VoxtralRealtimeDecoderKVCacheAppendPlan.capacityBlock
+        )
+        self.keys = MLXArray.zeros([initialCapacity, keys.shape[1]], dtype: keys.dtype)
+        self.values = MLXArray.zeros([initialCapacity, values.shape[1]], dtype: values.dtype)
+        _ = append(keys: keys, values: values)
+    }
+
+    func append(keys newKeys: MLXArray, values newValues: MLXArray) -> (
+        keys: MLXArray, values: MLXArray, positionOffset: Int
+    ) {
+        precondition(newKeys.ndim == 2 && newValues.ndim == 2)
+        precondition(newKeys.shape == newValues.shape)
+        precondition(newKeys.shape[1] == keys.shape[1])
+        precondition(newKeys.dtype == keys.dtype && newValues.dtype == values.dtype)
+
+        let plan = VoxtralRealtimeDecoderKVCacheAppendPlan.make(
+            count: count,
+            capacity: keys.shape[0],
+            positionOffset: positionOffset,
+            appendCount: newKeys.shape[0],
+            slidingWindow: slidingWindow
+        )
+
+        if let retained = plan.compactionRange {
+            keys[0..<retained.count] = keys[retained]
+            values[0..<retained.count] = values[retained]
+            count = retained.count
+            positionOffset = plan.positionOffset
+        }
+
+        if plan.requiresGrowth {
+            var grownKeys = MLXArray.zeros([plan.capacity, keys.shape[1]], dtype: keys.dtype)
+            var grownValues = MLXArray.zeros([plan.capacity, values.shape[1]], dtype: values.dtype)
+            if count > 0 {
+                grownKeys[0..<count] = keys[0..<count]
+                grownValues[0..<count] = values[0..<count]
+            }
+            keys = grownKeys
+            values = grownValues
+        }
+
+        keys[plan.appendRange] = newKeys
+        values[plan.appendRange] = newValues
+        count = plan.count
+        positionOffset = plan.positionOffset
+
+        return (
+            keys[plan.windowRange],
+            values[plan.windowRange],
+            plan.windowPositionOffset
+        )
+    }
 }
 
 func voxtralComputeTimeEmbedding(
@@ -107,26 +238,28 @@ final class VoxtralRealtimeDecoderAttention: Module {
         q = voxtralApplyInterleavedRoPE(q, cos: ropeCos, sin: ropeSin, nHeads: nHeads, headDim: headDim)
         k = voxtralApplyInterleavedRoPE(k, cos: ropeCos, sin: ropeSin, nHeads: nKvHeads, headDim: headDim)
 
-        var positionOffset = cache?.positionOffset ?? 0
+        let newCache: VoxtralRealtimeDecoderKVCache
+        let window: (keys: MLXArray, values: MLXArray, positionOffset: Int)
         if let cache {
-            k = MLX.concatenated([cache.keys, k], axis: 0)
-            v = MLX.concatenated([cache.values, v], axis: 0)
+            newCache = cache
+            window = cache.append(keys: k, values: v)
+        } else {
+            newCache = VoxtralRealtimeDecoderKVCache(
+                keys: k,
+                values: v,
+                slidingWindow: slidingWindow
+            )
+            let windowRange = max(0, newCache.count - slidingWindow)..<newCache.count
+            window = (
+                newCache.keys[windowRange],
+                newCache.values[windowRange],
+                newCache.positionOffset + windowRange.lowerBound
+            )
         }
-
-        var kvLen = k.shape[0]
-        if kvLen > slidingWindow {
-            let trim = kvLen - slidingWindow
-            k = k[trim...]
-            v = v[trim...]
-            kvLen = slidingWindow
-            positionOffset += trim
-        }
-
-        let newCache = VoxtralRealtimeDecoderKVCache(
-            keys: k,
-            values: v,
-            positionOffset: positionOffset
-        )
+        k = window.keys
+        v = window.values
+        let positionOffset = window.positionOffset
+        let kvLen = k.shape[0]
 
         let q4 = q.reshaped(1, seqLen, nHeads, headDim).transposed(0, 2, 1, 3)
         let k4 = k.reshaped(1, kvLen, nKvHeads, headDim).transposed(0, 2, 1, 3)
