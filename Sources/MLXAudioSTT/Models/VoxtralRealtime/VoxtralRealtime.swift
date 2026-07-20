@@ -468,7 +468,10 @@ extension VoxtralRealtimeModel {
         tokenizer?.decode(tokenIds: tokenIds) ?? ""
     }
 
-    func sample(logits: MLXArray, temperature: Float) -> Int {
+    /// The sampled-token graph without the host sync: callers that pipeline decoding
+    /// schedule this scalar with `asyncEval` and `item()` it one iteration later.
+    /// Same ops in the same order as the previous inline `sample` body.
+    func sampleScalar(logits: MLXArray, temperature: Float) -> MLXArray {
         let logits1D: MLXArray
         if logits.ndim > 1 {
             logits1D = logits.squeezed()
@@ -477,12 +480,15 @@ extension VoxtralRealtimeModel {
         }
 
         if temperature == 0 {
-            return logits1D.argMax(axis: -1).item(Int.self)
+            return logits1D.argMax(axis: -1)
         }
 
         let scaled = (logits1D / temperature).expandedDimensions(axis: 0)
-        let sampled = categorical(scaled)
-        return sampled.item(Int.self)
+        return categorical(scaled).squeezed()
+    }
+
+    func sample(logits: MLXArray, temperature: Float) -> Int {
+        sampleScalar(logits: logits, temperature: temperature).item(Int.self)
     }
 }
 

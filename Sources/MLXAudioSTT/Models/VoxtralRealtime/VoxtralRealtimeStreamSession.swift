@@ -95,7 +95,12 @@ public final class VoxtralRealtimeStreamSession {
     private var encState: VoxtralRealtimeStreamEncoderState
     private var adapterBuf: MLXArray?
     private var decCache: [VoxtralRealtimeDecoderKVCache?]?
-    private var lastLogits: MLXArray?
+    // One-token-lag pipeline: the sampled-token scalar for position `decPos`, already
+    // scheduled with `asyncEval`. Consuming it (`item()`) waits only for work the GPU
+    // started during the previous loop iteration — or, across `step` calls, during the
+    // idle gap between cadence ticks — instead of hard-blocking on a fresh eval per
+    // token. Values are identical to the synchronous loop; only scheduling changes.
+    private var pendingSample: MLXArray?
     private var decPos = 0
     private var promptLength = 0
     private var prefilled = false
@@ -241,7 +246,10 @@ public final class VoxtralRealtimeStreamSession {
 
     /// Materialise the carried front-end arrays (conv rows + conv tails), the adapter
     /// buffer, and the encoder caches so the lazy graph stays bounded across chunks
-    /// (each chunk would otherwise extend one unbroken graph).
+    /// (each chunk would otherwise extend one unbroken graph). Scheduled with
+    /// `asyncEval`: committing the graph is what bounds it — the results themselves are
+    /// only needed by later graphs, which the GPU queue orders after this work, so the
+    /// step never has to block on the encoder pass.
     private func freezeEncoderState() {
         var arrays: [MLXArray] = []
         if let convRows { arrays.append(convRows) }
@@ -251,7 +259,7 @@ public final class VoxtralRealtimeStreamSession {
         for cache in encState.caches {
             if let cache { arrays.append(cache.keys); arrays.append(cache.values) }
         }
-        if !arrays.isEmpty { MLX.eval(arrays) }
+        if !arrays.isEmpty { MLX.asyncEval(arrays) }
     }
 
     private func prefillIfNeeded(adapter: MLXArray) {
@@ -266,11 +274,15 @@ public final class VoxtralRealtimeStreamSession {
 
         let prefixEmbeds = adapter[0..<promptLength, 0...] + promptTextEmbeds
         let prefill = model.decoder(prefixEmbeds, startPos: 0, cache: nil)
-        lastLogits = model.decoder.logits(prefill.0[prefill.0.shape[0] - 1])
+        let scalar = model.sampleScalar(
+            logits: model.decoder.logits(prefill.0[prefill.0.shape[0] - 1]),
+            temperature: temperature
+        )
+        MLX.asyncEval(scalar)
+        pendingSample = scalar
         decCache = prefill.1
         decPos = promptLength
         prefilled = true
-        MLX.eval(lastLogits!)
     }
 
     private func decode(adapter: MLXArray, upTo emitLimit: Int) -> Delta {
@@ -278,10 +290,14 @@ public final class VoxtralRealtimeStreamSession {
 
         var newIds: [Int] = []
         // Mirrors the offline `generate` loop exactly (append → check → pop trailing
-        // EOS) so the streamed token stream is identical at temperature 0.
+        // EOS) so the streamed token stream is identical at temperature 0. Each
+        // iteration consumes the already-scheduled sample for `decPos` and schedules
+        // the next one before leaving, so the final token's decoder pass and lm-head
+        // run while the host is idle between cadence ticks instead of blocking the
+        // step's return.
         while decPos < emitLimit {
-            guard let logits = lastLogits else { break }
-            let token = model.sample(logits: logits, temperature: temperature)
+            guard let pending = pendingSample else { break }
+            let token = pending.item(Int.self)
             generated.append(token)
 
             if token == model.config.eosTokenId || generated.count > maxTokens {
@@ -301,9 +317,13 @@ public final class VoxtralRealtimeStreamSession {
                 cache: decCache
             )
             decCache = next.1
-            lastLogits = model.decoder.logits(next.0[0])
+            let scalar = model.sampleScalar(
+                logits: model.decoder.logits(next.0[0]),
+                temperature: temperature
+            )
+            MLX.asyncEval(scalar)
+            pendingSample = scalar
             decPos += 1
-            MLX.eval(lastLogits!)
             // Same cadence as the offline `generate` loop.
             if generated.count % 256 == 0 {
                 Memory.clearCache()
