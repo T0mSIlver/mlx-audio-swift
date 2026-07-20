@@ -16,45 +16,6 @@ struct VoxtralRealtimeConvStemState {
     var conv2Carry: MLXArray? // [1, 1..2, dim] — conv1 output suffix from the next stride-2 window
 }
 
-func voxtralComputeRopeFrequencies(
-    positions: MLXArray,
-    headDim: Int,
-    theta: Float
-) -> (cos: MLXArray, sin: MLXArray) {
-    let idx = MLXArray(stride(from: 0, to: headDim, by: 2)).asType(.float32)
-    let invFreq = MLX.exp((-log(theta)) * (idx / Float(headDim)))
-    let angles = positions.asType(.float32).expandedDimensions(axis: 1) * invFreq.expandedDimensions(axis: 0)
-    return (MLX.cos(angles), MLX.sin(angles))
-}
-
-func voxtralApplyInterleavedRoPE(
-    _ x: MLXArray,
-    cos: MLXArray,
-    sin: MLXArray,
-    nHeads: Int,
-    headDim: Int
-) -> MLXArray {
-    let seqLen = x.shape[0]
-    let halfDim = headDim / 2
-
-    let reshaped = x.reshaped(seqLen, nHeads, halfDim, 2)
-    let x1 = reshaped[0..., 0..., 0..., 0]
-    let x2 = reshaped[0..., 0..., 0..., 1]
-
-    // cos/sin are float32 for precision; cast down so rotating fp16 q/k stays fp16.
-    let cosE = cos.expandedDimensions(axis: 1).asType(x.dtype)
-    let sinE = sin.expandedDimensions(axis: 1).asType(x.dtype)
-
-    let o1 = x1 * cosE - x2 * sinE
-    let o2 = x2 * cosE + x1 * sinE
-
-    let out = MLX.concatenated(
-        [o1.expandedDimensions(axis: -1), o2.expandedDimensions(axis: -1)],
-        axis: -1
-    )
-    return out.reshaped(seqLen, nHeads * headDim)
-}
-
 final class VoxtralRealtimeCausalConv1d: Module {
     let kernelSize: Int
     let stride: Int
@@ -93,19 +54,16 @@ final class VoxtralRealtimeCausalConv1d: Module {
 }
 
 /// Attention inputs that are identical for every transformer layer of a single
-/// encoder forward pass: the interleaved-RoPE cos/sin tables for `positions` and
-/// the scaled-dot-product-attention mask.
+/// encoder forward pass: the contiguous RoPE offset and the
+/// scaled-dot-product-attention mask.
 ///
 /// The per-layer attention used to rebuild these from scratch — `nLayers` copies
 /// of the same ~15 tiny kernels per pass. For the realtime streaming session the
 /// encoder runs every audio chunk over only a handful of new frames, so those
 /// redundant launches (not bandwidth) dominate encoder step time. The caller now
-/// builds the shared inputs once per pass and every layer reuses them. The values
-/// are produced by exactly the same operations as before, in the same order, so
-/// every layer output is bit-identical to the per-layer construction.
+/// builds the shared mask once per pass and every layer reuses it.
 struct VoxtralRealtimeEncoderAttentionInputs {
-    let ropeCos: MLXArray
-    let ropeSin: MLXArray
+    let ropeOffset: Int
     let mask: MLXFast.ScaledDotProductAttentionMaskMode
 
     /// Build the shared inputs for one forward pass of `seqLen` frames at
@@ -118,19 +76,12 @@ struct VoxtralRealtimeEncoderAttentionInputs {
     /// here. `dtype` is the activation (q/k) dtype the mask must match.
     static func build(
         positions: MLXArray,
+        ropeOffset: Int,
         seqLen: Int,
         caches: [VoxtralRealtimeEncoderKVCache?],
         slidingWindow: Int,
-        headDim: Int,
-        ropeTheta: Float,
         dtype: DType
     ) -> VoxtralRealtimeEncoderAttentionInputs {
-        let (cos, sin) = voxtralComputeRopeFrequencies(
-            positions: positions,
-            headDim: headDim,
-            theta: ropeTheta
-        )
-
         let cache = caches.first ?? nil
         let cachedLen = cache?.keys.shape[0] ?? 0
         let cachedOffset = cache?.positionOffset ?? 0
@@ -168,8 +119,7 @@ struct VoxtralRealtimeEncoderAttentionInputs {
         }
 
         return VoxtralRealtimeEncoderAttentionInputs(
-            ropeCos: cos,
-            ropeSin: sin,
+            ropeOffset: ropeOffset,
             mask: maskMode
         )
     }
@@ -208,14 +158,26 @@ final class VoxtralRealtimeEncoderAttention: Module {
     ) -> (MLXArray, VoxtralRealtimeEncoderKVCache) {
         let seqLen = x.shape[0]
 
-        var q = wq(x)
-        var k = wk(x)
+        // Keep the batch axis: mlx-swift's Metal RoPE kernel misinterprets heads
+        // as batches for 3-D [H, L, D] inputs when L == 1.
+        let q4 = MLXFast.RoPE(
+            wq(x).reshaped(1, seqLen, nHeads, headDim).transposed(0, 2, 1, 3),
+            dimensions: headDim,
+            traditional: true,
+            base: ropeTheta,
+            scale: 1.0,
+            offset: inputs.ropeOffset
+        )
+        let newK4 = MLXFast.RoPE(
+            wk(x).reshaped(1, seqLen, nHeads, headDim).transposed(0, 2, 1, 3),
+            dimensions: headDim,
+            traditional: true,
+            base: ropeTheta,
+            scale: 1.0,
+            offset: inputs.ropeOffset
+        )
+        var k = newK4.transposed(0, 2, 1, 3).reshaped(seqLen, nHeads * headDim)
         var v = wv(x)
-
-        q = voxtralApplyInterleavedRoPE(
-            q, cos: inputs.ropeCos, sin: inputs.ropeSin, nHeads: nHeads, headDim: headDim)
-        k = voxtralApplyInterleavedRoPE(
-            k, cos: inputs.ropeCos, sin: inputs.ropeSin, nHeads: nHeads, headDim: headDim)
 
         var positionOffset = cache?.positionOffset ?? 0
         if let cache {
@@ -238,7 +200,6 @@ final class VoxtralRealtimeEncoderAttention: Module {
             positionOffset: positionOffset
         )
 
-        let q4 = q.reshaped(1, seqLen, nHeads, headDim).transposed(0, 2, 1, 3)
         let k4 = k.reshaped(1, kvLen, nHeads, headDim).transposed(0, 2, 1, 3)
         let v4 = v.reshaped(1, kvLen, nHeads, headDim).transposed(0, 2, 1, 3)
 
@@ -398,31 +359,30 @@ final class VoxtralRealtimeAudioEncoder: Module {
         return gelu(convLayers1Conv.conv(in2)).squeezed(axis: 0)
     }
 
-    /// Shared per-pass attention inputs (RoPE tables + mask) for `seqLen` frames
-    /// at `positions`, extending `caches` — see
+    /// Shared per-pass attention inputs (RoPE offset + mask) for `seqLen` frames
+    /// at `startPos`, extending `caches` — see
     /// `VoxtralRealtimeEncoderAttentionInputs`.
     private func attentionInputs(
-        positions: MLXArray,
+        startPos: Int,
         seqLen: Int,
         caches: [VoxtralRealtimeEncoderKVCache?],
         dtype: DType
     ) -> VoxtralRealtimeEncoderAttentionInputs {
-        VoxtralRealtimeEncoderAttentionInputs.build(
+        let positions = MLXArray(startPos..<(startPos + seqLen)).asType(.int32)
+        return VoxtralRealtimeEncoderAttentionInputs.build(
             positions: positions,
+            ropeOffset: startPos,
             seqLen: seqLen,
             caches: caches,
             slidingWindow: config.slidingWindow,
-            headDim: config.headDim,
-            ropeTheta: config.ropeTheta,
             dtype: dtype
         )
     }
 
     func encodeFull(_ convOut: MLXArray) -> MLXArray {
         let seqLen = convOut.shape[0]
-        let positions = MLXArray(0..<seqLen).asType(.int32)
         let inputs = attentionInputs(
-            positions: positions, seqLen: seqLen, caches: [], dtype: convOut.dtype)
+            startPos: 0, seqLen: seqLen, caches: [], dtype: convOut.dtype)
 
         var x = convOut
         for layer in transformerLayers {
@@ -448,9 +408,8 @@ final class VoxtralRealtimeAudioEncoder: Module {
         while chunkStart < seqLen {
             let chunkEnd = min(chunkStart + sw, seqLen)
             var x = convOut[chunkStart..<chunkEnd, 0...]
-            let positions = MLXArray(chunkStart..<chunkEnd).asType(.int32)
             let inputs = attentionInputs(
-                positions: positions, seqLen: chunkEnd - chunkStart, caches: caches,
+                startPos: chunkStart, seqLen: chunkEnd - chunkStart, caches: caches,
                 dtype: x.dtype)
 
             for i in transformerLayers.indices {
@@ -478,9 +437,8 @@ final class VoxtralRealtimeAudioEncoder: Module {
         caches: inout [VoxtralRealtimeEncoderKVCache?]
     ) -> MLXArray {
         var x = convBlock
-        let positions = MLXArray(startPos..<(startPos + convBlock.shape[0])).asType(.int32)
         let inputs = attentionInputs(
-            positions: positions, seqLen: convBlock.shape[0], caches: caches, dtype: x.dtype)
+            startPos: startPos, seqLen: convBlock.shape[0], caches: caches, dtype: x.dtype)
         for i in transformerLayers.indices {
             let next = transformerLayers[i](x, inputs: inputs, cache: caches[i])
             x = next.0

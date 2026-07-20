@@ -16,8 +16,19 @@ import Foundation
 import Testing
 import MLX
 import MLXNN
+#if canImport(Metal)
+import Metal
+#endif
 
 @testable import MLXAudioSTT
+
+private let voxtralRealtimeMetalAvailable: Bool = {
+    #if canImport(Metal)
+    return MTLCreateSystemDefaultDevice() != nil
+    #else
+    return false
+    #endif
+}()
 
 struct VoxtralRealtimeStreamingFrontEndTests {
     private static let samplesPerToken = 1280
@@ -81,6 +92,80 @@ struct VoxtralRealtimeStreamingFrontEndTests {
 
     private static func maxAbsDifference(_ a: MLXArray, _ b: MLXArray) -> Float {
         MLX.abs(a - b).max().item(Float.self)
+    }
+
+    /// The pre-fused implementation: float32 frequency tables, adjacent-pair
+    /// rotation, then a cast back to the activation dtype before arithmetic.
+    private static func manualInterleavedRoPE(
+        _ x: MLXArray,
+        headDim: Int,
+        theta: Float,
+        offset: Int,
+        reciprocalPowerFrequencies: Bool
+    ) -> MLXArray {
+        let seqLen = x.shape[2]
+        let halfDim = headDim / 2
+        let positions = MLXArray(offset..<(offset + seqLen)).asType(.float32)
+        let idx = MLXArray(stride(from: 0, to: headDim, by: 2)).asType(.float32)
+        let invFreq = reciprocalPowerFrequencies
+            ? 1.0 / MLX.pow(MLXArray(theta), idx / Float(headDim))
+            : MLX.exp((-log(theta)) * (idx / Float(headDim)))
+        let angles = positions.expandedDimensions(axis: 1) * invFreq.expandedDimensions(axis: 0)
+        let cos = MLX.cos(angles).expandedDimensions(axis: 0).expandedDimensions(axis: 0)
+            .asType(x.dtype)
+        let sin = MLX.sin(angles).expandedDimensions(axis: 0).expandedDimensions(axis: 0)
+            .asType(x.dtype)
+
+        let paired = x.reshaped(x.shape.dropLast() + [halfDim, 2])
+        let x1 = paired[0..., 0..., 0..., 0..., 0]
+        let x2 = paired[0..., 0..., 0..., 0..., 1]
+        let o1 = x1 * cos - x2 * sin
+        let o2 = x2 * cos + x1 * sin
+        return MLX.concatenated(
+            [o1.expandedDimensions(axis: -1), o2.expandedDimensions(axis: -1)],
+            axis: -1
+        ).reshaped(x.shape)
+    }
+
+    /// Guards mlx-swift#441: fused RoPE must receive [B, H, L, D], especially
+    /// for the decoder's single-token L == 1 path.
+    @Test func fusedRoPEMatchesManualInterleavedGraph() {
+        guard voxtralRealtimeMetalAvailable else { return }
+
+        MLXRandom.seed(42)
+        let parameterizations: [
+            (headDim: Int, theta: Float, reciprocalPowerFrequencies: Bool)
+        ] = [
+            (headDim: 128, theta: 1_000_000, reciprocalPowerFrequencies: true), // decoder
+            (headDim: 64, theta: 1_000_000, reciprocalPowerFrequencies: false), // encoder
+        ]
+
+        for parameters in parameterizations {
+            for seqLen in [1, 8] {
+                for offset in [0, 23] {
+                    let input = MLXRandom.normal([1, 4, seqLen, parameters.headDim])
+                        .asType(.float16)
+                    let manual = Self.manualInterleavedRoPE(
+                        input,
+                        headDim: parameters.headDim,
+                        theta: parameters.theta,
+                        offset: offset,
+                        reciprocalPowerFrequencies: parameters.reciprocalPowerFrequencies
+                    )
+                    let fused = MLXFast.RoPE(
+                        input,
+                        dimensions: parameters.headDim,
+                        traditional: true,
+                        base: parameters.theta,
+                        scale: 1.0,
+                        offset: offset
+                    )
+
+                    #expect(fused.dtype == .float16)
+                    #expect(Self.maxAbsDifference(fused, manual) < 2e-3)
+                }
+            }
+        }
     }
 
     @Test func melStreamMatchesOfflineAcrossIrregularChunks() {
