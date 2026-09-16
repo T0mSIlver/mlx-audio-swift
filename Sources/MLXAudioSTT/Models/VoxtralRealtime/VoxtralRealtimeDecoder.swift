@@ -2,10 +2,175 @@ import Foundation
 import MLX
 import MLXNN
 
-struct VoxtralRealtimeDecoderKVCache {
-    var keys: MLXArray   // [kv_len, n_kv_heads * head_dim]
-    var values: MLXArray // [kv_len, n_kv_heads * head_dim]
-    var positionOffset: Int
+/// Index arithmetic for one `VoxtralRealtimeDecoderKVCache.append`, kept apart from the
+/// arrays so it can be tested without Metal.
+///
+/// The storage holds `count` rows in order. Rows older than the sliding window stay in
+/// place until one block of them has piled up, or until the storage is full; then the
+/// window is copied down to row zero in one move. Storage grows a block at a time.
+struct VoxtralRealtimeDecoderKVCacheAppendPlan: Equatable {
+    static let capacityBlock = 256
+
+    /// Rows to copy down to row zero before appending, or nil when nothing moves.
+    let compactionRange: Range<Int>?
+    /// Where the new rows land, after any compaction.
+    let appendRange: Range<Int>
+    /// Storage rows after this append.
+    let capacity: Int
+    /// Stored rows after this append.
+    let count: Int
+    /// Absolute position of storage row zero after this append.
+    let positionOffset: Int
+    /// The rows attention sees: the last `slidingWindow` stored rows.
+    let windowRange: Range<Int>
+    /// Absolute position of the first row in `windowRange`.
+    let windowPositionOffset: Int
+    let requiresGrowth: Bool
+
+    static func make(
+        count: Int,
+        capacity: Int,
+        positionOffset: Int,
+        appendCount: Int,
+        slidingWindow: Int
+    ) -> Self {
+        precondition(count >= 0 && count <= capacity)
+        precondition(appendCount >= 0)
+        precondition(slidingWindow > 0)
+
+        let projectedCount = count + appendCount
+        let excessAfterAppend = max(0, projectedCount - slidingWindow)
+        // Let one block of invisible rows accumulate. If the storage fills first,
+        // reclaim that prefix instead of growing it again.
+        let shouldCompact = count > slidingWindow
+            && (projectedCount > capacity || excessAfterAppend > capacityBlock)
+        let compactionRange: Range<Int>? = shouldCompact
+            ? ((count - slidingWindow)..<count)
+            : nil
+        let droppedCount = compactionRange?.lowerBound ?? 0
+        let compactedCount = compactionRange?.count ?? count
+        let appendRange = compactedCount..<(compactedCount + appendCount)
+        let requiredCapacity = appendRange.upperBound
+        let requiresGrowth = requiredCapacity > capacity
+        let capacityAfterGrowth: Int
+        if requiresGrowth {
+            capacityAfterGrowth = max(
+                capacityBlock,
+                ((requiredCapacity + capacityBlock - 1) / capacityBlock) * capacityBlock
+            )
+        } else {
+            capacityAfterGrowth = capacity
+        }
+
+        let newCount = appendRange.upperBound
+        let windowStart = max(0, newCount - slidingWindow)
+        let newPositionOffset = positionOffset + droppedCount
+        return Self(
+            compactionRange: compactionRange,
+            appendRange: appendRange,
+            capacity: capacityAfterGrowth,
+            count: newCount,
+            positionOffset: newPositionOffset,
+            windowRange: windowStart..<newCount,
+            windowPositionOffset: newPositionOffset + windowStart,
+            requiresGrowth: requiresGrowth
+        )
+    }
+}
+
+/// Decoder key/value cache that writes each new row into preallocated storage.
+///
+/// The previous cache was a value holding exactly the window, rebuilt on every token by
+/// concatenating the new row and slicing off the oldest. That copied every layer's keys
+/// and values for every decoded token, and kept the old and new copies alive together.
+/// This cache hands attention the same rows at the same positions (see
+/// `VoxtralRealtimeDecoderKVCacheTests`). A token's rows go in through a slice update,
+/// which MLX runs in place when nothing else references the storage buffer; the whole
+/// window moves only on growth, once per block, and on compaction.
+///
+/// That in-place write depends on the storage having a single owner when the update
+/// is evaluated. If something kept another reference to `keys` or `values` alive
+/// across that point, MLX would copy the whole storage on every append, per layer,
+/// which costs more than the scheme this replaced. The stream session, `generate` and
+/// `generateStream` hold nothing but the cache itself and each step's window slices,
+/// which are evaluated before the next append.
+///
+/// It is a class, so `append` changes it for every holder. The decoder passes each cache
+/// from one forward call to the next and never keeps an older one, so nothing observes a
+/// cache changing underneath it.
+final class VoxtralRealtimeDecoderKVCache {
+    private(set) var keys: MLXArray   // [capacity, n_kv_heads * head_dim]
+    private(set) var values: MLXArray // [capacity, n_kv_heads * head_dim]
+    private(set) var count = 0
+    private(set) var positionOffset = 0 // absolute position of storage row zero
+
+    private let slidingWindow: Int
+
+    init(keys: MLXArray, values: MLXArray, slidingWindow: Int) {
+        precondition(keys.ndim == 2 && values.ndim == 2)
+        precondition(keys.shape == values.shape)
+
+        self.slidingWindow = slidingWindow
+        let initialCapacity = max(
+            VoxtralRealtimeDecoderKVCacheAppendPlan.capacityBlock,
+            ((keys.shape[0] + VoxtralRealtimeDecoderKVCacheAppendPlan.capacityBlock - 1)
+                / VoxtralRealtimeDecoderKVCacheAppendPlan.capacityBlock)
+                * VoxtralRealtimeDecoderKVCacheAppendPlan.capacityBlock
+        )
+        self.keys = MLXArray.zeros([initialCapacity, keys.shape[1]], dtype: keys.dtype)
+        self.values = MLXArray.zeros([initialCapacity, values.shape[1]], dtype: values.dtype)
+        _ = append(keys: keys, values: values)
+    }
+
+    /// Append rows and return what attention should read: the last `slidingWindow`
+    /// stored rows, and the absolute position of the first of them.
+    func append(keys newKeys: MLXArray, values newValues: MLXArray) -> (
+        keys: MLXArray, values: MLXArray, positionOffset: Int
+    ) {
+        precondition(newKeys.ndim == 2 && newValues.ndim == 2)
+        precondition(newKeys.shape == newValues.shape)
+        precondition(newKeys.shape[1] == keys.shape[1])
+        precondition(newKeys.dtype == keys.dtype && newValues.dtype == values.dtype)
+
+        let plan = VoxtralRealtimeDecoderKVCacheAppendPlan.make(
+            count: count,
+            capacity: keys.shape[0],
+            positionOffset: positionOffset,
+            appendCount: newKeys.shape[0],
+            slidingWindow: slidingWindow
+        )
+
+        if let retained = plan.compactionRange {
+            // Self-overlapping ranges are safe because MLXArray subscript setters are
+            // functional: the RHS view captures the pre-assignment handle, so this
+            // reads old values even where source and destination overlap.
+            keys[0..<retained.count] = keys[retained]
+            values[0..<retained.count] = values[retained]
+            count = retained.count  // the growth copy below reads this
+        }
+
+        if plan.requiresGrowth {
+            var grownKeys = MLXArray.zeros([plan.capacity, keys.shape[1]], dtype: keys.dtype)
+            var grownValues = MLXArray.zeros([plan.capacity, values.shape[1]], dtype: values.dtype)
+            if count > 0 {
+                grownKeys[0..<count] = keys[0..<count]
+                grownValues[0..<count] = values[0..<count]
+            }
+            keys = grownKeys
+            values = grownValues
+        }
+
+        keys[plan.appendRange] = newKeys
+        values[plan.appendRange] = newValues
+        count = plan.count
+        positionOffset = plan.positionOffset
+
+        return (
+            keys[plan.windowRange],
+            values[plan.windowRange],
+            plan.windowPositionOffset
+        )
+    }
 }
 
 func voxtralComputeTimeEmbedding(
@@ -103,26 +268,28 @@ final class VoxtralRealtimeDecoderAttention: Module {
         q = voxtralApplyInterleavedRoPE(q, cos: ropeCos, sin: ropeSin, nHeads: nHeads, headDim: headDim)
         k = voxtralApplyInterleavedRoPE(k, cos: ropeCos, sin: ropeSin, nHeads: nKvHeads, headDim: headDim)
 
-        var positionOffset = cache?.positionOffset ?? 0
+        let newCache: VoxtralRealtimeDecoderKVCache
+        let window: (keys: MLXArray, values: MLXArray, positionOffset: Int)
         if let cache {
-            k = MLX.concatenated([cache.keys, k], axis: 0)
-            v = MLX.concatenated([cache.values, v], axis: 0)
+            newCache = cache
+            window = cache.append(keys: k, values: v)
+        } else {
+            newCache = VoxtralRealtimeDecoderKVCache(
+                keys: k,
+                values: v,
+                slidingWindow: slidingWindow
+            )
+            let windowRange = max(0, newCache.count - slidingWindow)..<newCache.count
+            window = (
+                newCache.keys[windowRange],
+                newCache.values[windowRange],
+                newCache.positionOffset + windowRange.lowerBound
+            )
         }
-
-        var kvLen = k.shape[0]
-        if kvLen > slidingWindow {
-            let trim = kvLen - slidingWindow
-            k = k[trim...]
-            v = v[trim...]
-            kvLen = slidingWindow
-            positionOffset += trim
-        }
-
-        let newCache = VoxtralRealtimeDecoderKVCache(
-            keys: k,
-            values: v,
-            positionOffset: positionOffset
-        )
+        k = window.keys
+        v = window.values
+        let positionOffset = window.positionOffset
+        let kvLen = k.shape[0]
 
         let q4 = q.reshaped(1, seqLen, nHeads, headDim).transposed(0, 2, 1, 3)
         let k4 = k.reshaped(1, kvLen, nKvHeads, headDim).transposed(0, 2, 1, 3)
