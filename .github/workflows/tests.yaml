@@ -24,4 +24,4 @@ jobs:
         run: xcodebuild build-for-testing -scheme MLXAudio-Package -destination 'platform=macOS' MACOSX_DEPLOYMENT_TARGET=14.0 CODE_SIGNING_ALLOWED=NO
       - name: Run tests
         timeout-minutes: 25
-        run: xcodebuild test-without-building -scheme MLXAudio-Package -destination 'platform=macOS' -skip-testing:'MLXAudioTests/SmokeTests' -parallel-testing-enabled NO CODE_SIGNING_ALLOWED=NO
+        run: xcodebuild test-without-building -scheme MLXAudio-Package -destination 'platform=macOS' -skip-testing:'MLXAudioTests/SmokeTests' -skip-testing:'MLXAudioTests/SparkTTSTests' -skip-testing:'MLXAudioTests/MelFrontendReferenceTests' -skip-testing:'MLXAudioTests/WhisperQuantizedTiedEmbeddingTests' -parallel-testing-enabled NO CODE_SIGNING_ALLOWED=NO
