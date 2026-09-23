@@ -213,26 +213,23 @@ public final class VoxtralRealtimeModel: Module, STTGenerationModel {
             )
 
             var generated: [Int] = []
-            var previousText = ""
+            // Built from each token's bytes, so a token's delta does not re-decode the
+            // whole transcript. Its text equals `tokenizer.decode(generated)` with EOS
+            // left out.
+            var transcript = VoxtralRealtimeTranscriptText()
             let decodeStart = Date()
 
             for pos in context.promptLength..<context.nAudioTotal {
                 let token = sample(logits: context.logits, temperature: generationParameters.temperature)
                 generated.append(token)
 
-                let filtered = generated.filter { $0 != config.eosTokenId }
-                let textSoFar = tokenizer?.decode(tokenIds: filtered) ?? ""
-                if textSoFar != previousText {
-                    let delta: String
-                    if textSoFar.hasPrefix(previousText) {
-                        delta = String(textSoFar.dropFirst(previousText.count))
-                    } else {
-                        delta = textSoFar
-                    }
+                if token != config.eosTokenId {
+                    let mark = transcript.mark
+                    transcript.append(streamingTokenBytes(token))
+                    let delta = transcript.delta(since: mark)
                     if !delta.isEmpty {
                         continuation.yield(.token(delta))
                     }
-                    previousText = textSoFar
                 }
 
                 if token == config.eosTokenId || generated.count > generationParameters.maxTokens {
