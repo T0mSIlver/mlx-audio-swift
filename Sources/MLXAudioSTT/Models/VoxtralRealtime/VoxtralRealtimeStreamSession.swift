@@ -99,7 +99,9 @@ public final class VoxtralRealtimeStreamSession {
     private var encState: VoxtralRealtimeStreamEncoderState
     private var adapterBuf: MLXArray?
     private var decCache: [VoxtralRealtimeDecoderKVCache?]?
-    private var lastLogits: MLXArray?
+    /// The next position's prediction, evaluated: at temperature 0 the argmax token
+    /// id, otherwise the logits (sampled when read so the RNG draws keep their order).
+    private var pendingPrediction: MLXArray?
     private var decPos = 0
     private var promptLength = 0
     private var prefilled = false
@@ -305,11 +307,26 @@ public final class VoxtralRealtimeStreamSession {
 
         let prefixEmbeds = adapter[0..<promptLength, 0...] + promptTextEmbeds
         let prefill = model.decoder(prefixEmbeds, startPos: 0, cache: nil)
-        lastLogits = model.decoder.logits(prefill.0[prefill.0.shape[0] - 1])
+        pendingPrediction = evalPrediction(model.decoder.logits(prefill.0[prefill.0.shape[0] - 1]))
         decCache = prefill.1
         decPos = promptLength
         prefilled = true
-        MLX.eval(lastLogits!)
+    }
+
+    /// Evaluate what the next token needs from `logits`. At temperature 0 the argmax
+    /// joins the forward pass's graph, so each token costs one GPU round trip instead
+    /// of two (eval the logits, then eval the argmax in `item()`), and the full-vocab
+    /// logits are freed with the graph. It is the same argmax on the same logits.
+    private func evalPrediction(_ logits: MLXArray) -> MLXArray {
+        let prediction = temperature == 0 ? logits.argMax(axis: -1) : logits
+        MLX.eval(prediction)
+        return prediction
+    }
+
+    private func readToken(_ prediction: MLXArray) -> Int {
+        temperature == 0
+            ? prediction.item(Int.self)
+            : model.sample(logits: prediction, temperature: temperature)
     }
 
     private func decode(adapter: MLXArray, upTo emitLimit: Int) -> Delta {
@@ -320,8 +337,8 @@ public final class VoxtralRealtimeStreamSession {
         // Mirrors the offline `generate` loop exactly (append → check → pop trailing
         // EOS) so the streamed token stream is identical at temperature 0.
         while decPos < emitLimit {
-            guard let logits = lastLogits else { break }
-            let token = model.sample(logits: logits, temperature: temperature)
+            guard let prediction = pendingPrediction else { break }
+            let token = readToken(prediction)
             generated.append(token)
             // Only a trailing EOS is left out of the text, as in `generated`.
             if token != model.config.eosTokenId {
@@ -345,9 +362,8 @@ public final class VoxtralRealtimeStreamSession {
                 cache: decCache
             )
             decCache = next.1
-            lastLogits = model.decoder.logits(next.0[0])
+            pendingPrediction = evalPrediction(model.decoder.logits(next.0[0]))
             decPos += 1
-            MLX.eval(lastLogits!)
             // Same cadence as the offline `generate` loop.
             if generated.count % 256 == 0 {
                 Memory.clearCache()
