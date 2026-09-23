@@ -307,26 +307,12 @@ public final class VoxtralRealtimeStreamSession {
 
         let prefixEmbeds = adapter[0..<promptLength, 0...] + promptTextEmbeds
         let prefill = model.decoder(prefixEmbeds, startPos: 0, cache: nil)
-        pendingPrediction = evalPrediction(model.decoder.logits(prefill.0[prefill.0.shape[0] - 1]))
+        pendingPrediction = model.evalPrediction(
+            model.decoder.logits(prefill.0[prefill.0.shape[0] - 1]), temperature: temperature
+        )
         decCache = prefill.1
         decPos = promptLength
         prefilled = true
-    }
-
-    /// Evaluate what the next token needs from `logits`. At temperature 0 the argmax
-    /// joins the forward pass's graph, so each token costs one GPU round trip instead
-    /// of two (eval the logits, then eval the argmax in `item()`), and the full-vocab
-    /// logits are freed with the graph. It is the same argmax on the same logits.
-    private func evalPrediction(_ logits: MLXArray) -> MLXArray {
-        let prediction = temperature == 0 ? logits.argMax(axis: -1) : logits
-        MLX.eval(prediction)
-        return prediction
-    }
-
-    private func readToken(_ prediction: MLXArray) -> Int {
-        temperature == 0
-            ? prediction.item(Int.self)
-            : model.sample(logits: prediction, temperature: temperature)
     }
 
     private func decode(adapter: MLXArray, upTo emitLimit: Int) -> Delta {
@@ -338,7 +324,7 @@ public final class VoxtralRealtimeStreamSession {
         // EOS) so the streamed token stream is identical at temperature 0.
         while decPos < emitLimit {
             guard let prediction = pendingPrediction else { break }
-            let token = readToken(prediction)
+            let token = model.readToken(prediction, temperature: temperature)
             generated.append(token)
             // Only a trailing EOS is left out of the text, as in `generated`.
             if token != model.config.eosTokenId {
@@ -362,7 +348,9 @@ public final class VoxtralRealtimeStreamSession {
                 cache: decCache
             )
             decCache = next.1
-            pendingPrediction = evalPrediction(model.decoder.logits(next.0[0]))
+            pendingPrediction = model.evalPrediction(
+                model.decoder.logits(next.0[0]), temperature: temperature
+            )
             decPos += 1
             // Same cadence as the offline `generate` loop.
             if generated.count % 256 == 0 {
