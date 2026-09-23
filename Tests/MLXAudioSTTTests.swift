@@ -3616,13 +3616,24 @@ struct NemotronASRTests {
     /// The random tiny model may predict blank everywhere or nowhere. Shift the
     /// joint's blank logit bias until the per-frame decode of `prompted` satisfies
     /// `accept`. Shifts sit midway between the blank margins of neighbouring frames,
-    /// away from argmax ties.
+    /// away from argmax ties. Special tokens are dropped from the decoded ids, and
+    /// the random joint may favour one (<unk>, <en-US>) on every frame, so their
+    /// logits are pushed down first.
     private func calibrateBlankBias(
         _ model: NemotronASRModel,
         _ prompted: MLXArray,
         accept: ((ids: [Int], blankFrames: Int, maxPerFrame: Int, emissionFrames: [Int])) -> Bool
     ) throws -> Bool {
         let blank = model.blankTokenID
+        let vocab = model.vocabulary
+        var bias = model.joint.outputProj.bias!.asType(.float32).asArray(Float.self)
+        for id in vocab.indices where NemotronASRTokenizer.isSpecialToken(id, vocabulary: vocab) {
+            bias[id] -= 1000
+        }
+        try model.joint.outputProj.update(
+            parameters: ModuleParameters.unflattened(["bias": MLXArray(bias)]),
+            verify: .noUnusedKeys
+        )
         let pred = model.decoder(nil, state: nil).0.asType(prompted.dtype)
         let logits = model.joint(prompted, pred)  // (1, T, 1, J)
         let classes = logits.shape[3]
@@ -3635,7 +3646,6 @@ struct NemotronASRTests {
         }
         margins.sort()
 
-        let bias = model.joint.outputProj.bias!.asType(.float32).asArray(Float.self)
         let candidates = zip(margins, margins.dropFirst()).map { -($0 + $1) / 2 }
         var tried: [String] = []
         for shift in candidates.reversed() {
@@ -3664,6 +3674,7 @@ struct NemotronASRTests {
             print("Skipping Nemotron ASR MLX runtime test. Set MLXAUDIO_ENABLE_MLX_RUNTIME_TESTS=1 to enable.")
             return
         }
+        MLXRandom.seed(0)  // reproducible tiny-model weights
         let model = try tinyModel()
         let values = moduloFloatFixtureValues(count: 1 * 128 * 16, multiplier: 7, modulus: 23, divisor: 23.0)
         let mel = MLXArray(values).reshaped([1, 128, 16])
@@ -3702,23 +3713,13 @@ struct NemotronASRTests {
             print("Skipping Nemotron ASR MLX runtime test. Set MLXAUDIO_ENABLE_MLX_RUNTIME_TESTS=1 to enable.")
             return
         }
+        MLXRandom.seed(0)  // reproducible tiny-model weights
         let model = try tinyModel()
         let values = moduloFloatFixtureValues(count: 1 * 128 * 16, multiplier: 7, modulus: 23, divisor: 23.0)
         let mel = MLXArray(values).reshaped([1, 128, 16])
         // Calibrate on the same encoder input `decode` sees.
         let features = mel.asType(model.computeDType)
         let prompted = model.applyPrompt(model.encoder(features, attContextSize: [4, 1]).0, language: "en-US")
-        // Special tokens are dropped from both outputs, so a random joint that favours
-        // one (<unk>, <en-US>) on every frame leaves nothing to compare. Push them down.
-        let vocab = model.vocabulary
-        var bias = model.joint.outputProj.bias!.asType(.float32).asArray(Float.self)
-        for id in vocab.indices where NemotronASRTokenizer.isSpecialToken(id, vocabulary: vocab) {
-            bias[id] -= 1000
-        }
-        try model.joint.outputProj.update(
-            parameters: ModuleParameters.unflattened(["bias": MLXArray(bias)]),
-            verify: .noUnusedKeys
-        )
         // Only needs blank frames and emitted tokens; the stricter conditions are
         // covered by streamRNNTDecodeMatchesPerFrameRecompute.
         try #require(try calibrateBlankBias(model, prompted) { run in
