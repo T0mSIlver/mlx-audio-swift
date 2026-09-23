@@ -3565,25 +3565,21 @@ struct NemotronASRTests {
         #expect(fine == coarse)
     }
 
-    /// The stream RNN-T decode reuses the prediction output on blank frames; it must
-    /// emit the same tokens as recomputing the decoder and joint on every frame.
-    @Test func streamRNNTDecodeMatchesPerFrameRecompute() throws {
-        guard mlxRuntimeEnabled else {
-            print("Skipping Nemotron ASR MLX runtime test. Set MLXAUDIO_ENABLE_MLX_RUNTIME_TESTS=1 to enable.")
-            return
-        }
-        let model = try tinyModel()
-        let values = moduloFloatFixtureValues(count: 1 * 64 * 16, multiplier: 7, modulus: 23, divisor: 23.0)
-        let mel = MLXArray(values).reshaped([1, 64, 16])
-        let prompted = model.applyPrompt(model.encoder(mel, attContextSize: [4, 1]).0, language: "en-US")
-        let frames = prompted.shape[1]
-
-        var expected: [Int] = []
+    /// Greedy RNN-T that reruns the decoder and the full joint on every frame (the
+    /// loop before the prediction cache). Returns the non-special token ids, the
+    /// frames left on blank, and the most symbols emitted on one frame.
+    private func perFrameRecomputeDecode(
+        _ model: NemotronASRModel, _ prompted: MLXArray
+    ) -> (ids: [Int], blankFrames: Int, maxPerFrame: Int) {
+        var ids: [Int] = []
+        var blankFrames = 0
+        var maxPerFrame = 0
+        var emittedHere = 0
         var lastToken = model.blankTokenID
         var decoderState: NemoLSTMState?
         var time = 0
         var newSymbols = 0
-        while time < frames {
+        while time < prompted.shape[1] {
             let frame = prompted[0..., time..<(time + 1), 0...]
             let currentToken: MLXArray? = lastToken == model.blankTokenID
                 ? nil
@@ -3595,22 +3591,114 @@ struct NemotronASRTests {
                 newSymbols: newSymbols, maxSymbols: model.maxSymbols
             )
             if step.emittedToken {
+                emittedHere += 1
                 lastToken = token
                 decoderState = (hidden: out.1.hidden?.asType(frame.dtype), cell: out.1.cell?.asType(frame.dtype))
                 if !NemotronASRTokenizer.isSpecialToken(token, vocabulary: model.vocabulary) {
-                    expected.append(token)
+                    ids.append(token)
                 }
+            } else {
+                blankFrames += 1
+            }
+            if step.nextTime != time {
+                maxPerFrame = max(maxPerFrame, emittedHere)
+                emittedHere = 0
             }
             time = step.nextTime
             newSymbols = step.nextNewSymbols
         }
+        return (ids, blankFrames, maxPerFrame)
+    }
+
+    /// The random tiny model may predict blank everywhere or nowhere. Shift the
+    /// joint's blank logit bias until the per-frame decode of `prompted` has blank
+    /// frames, emitted tokens and a frame with at least 2 symbols. Shifts sit midway
+    /// between the blank margins of neighbouring frames, away from argmax ties.
+    private func calibrateBlankBias(_ model: NemotronASRModel, _ prompted: MLXArray) throws -> Bool {
+        let blank = model.blankTokenID
+        let pred = model.decoder(nil, state: nil).0.asType(prompted.dtype)
+        let logits = model.joint(prompted, pred)  // (1, T, 1, J)
+        let classes = logits.shape[3]
+        let values = logits.asType(.float32).asArray(Float.self)
+        var margins: [Float] = []
+        for t in 0..<logits.shape[1] {
+            let row = Array(values[(t * classes)..<((t + 1) * classes)])
+            let bestOther = row.enumerated().filter { $0.offset != blank }.map(\.element).max()!
+            margins.append(row[blank] - bestOther)
+        }
+        margins.sort()
+
+        let bias = model.joint.outputProj.bias!.asType(.float32).asArray(Float.self)
+        let candidates = zip(margins, margins.dropFirst()).map { -($0 + $1) / 2 }
+        for shift in candidates.reversed() {
+            var shifted = bias
+            shifted[blank] += shift
+            try model.joint.outputProj.update(
+                parameters: ModuleParameters.unflattened(["bias": MLXArray(shifted)]),
+                verify: .noUnusedKeys
+            )
+            let run = perFrameRecomputeDecode(model, prompted)
+            if !run.ids.isEmpty && run.blankFrames > 0 && run.maxPerFrame >= 2 { return true }
+        }
+        return false
+    }
+
+    /// The stream RNN-T decode reuses the prediction output on blank frames and reads
+    /// several frames per host sync; it must emit the same tokens as recomputing the
+    /// decoder and joint on every frame.
+    @Test func streamRNNTDecodeMatchesPerFrameRecompute() throws {
+        guard mlxRuntimeEnabled else {
+            print("Skipping Nemotron ASR MLX runtime test. Set MLXAUDIO_ENABLE_MLX_RUNTIME_TESTS=1 to enable.")
+            return
+        }
+        let model = try tinyModel()
+        let values = moduloFloatFixtureValues(count: 1 * 128 * 16, multiplier: 7, modulus: 23, divisor: 23.0)
+        let mel = MLXArray(values).reshaped([1, 128, 16])
+        let prompted = model.applyPrompt(model.encoder(mel, attContextSize: [4, 1]).0, language: "en-US")
+        let frames = prompted.shape[1]
+        try #require(try calibrateBlankBias(model, prompted))
+
+        let reference = perFrameRecomputeDecode(model, prompted)
+        #expect(!reference.ids.isEmpty)
+        #expect(reference.blankFrames > 0)
+        #expect(reference.maxPerFrame >= 2)
 
         // Two chunks, so the cache also carries across calls.
         let state = NemotronASRStreamRNNTState(blankToken: model.blankTokenID)
         let split = frames / 2
         model.streamRNNTDecode(prompted[0..., 0..<split, 0...], state: state, frameSeconds: 0.08)
         model.streamRNNTDecode(prompted[0..., split..<frames, 0...], state: state, frameSeconds: 0.08)
-        #expect(state.results.map(\.id) == expected)
+        #expect(state.results.map(\.id) == reference.ids)
+    }
+
+    /// Offline `decode` (full-sequence encoder, chunked-limited mask) and the
+    /// cache-aware stream encoder + stream RNN-T must emit the same tokens at the
+    /// native chunk size.
+    @Test func offlineDecodeMatchesCacheAwareStream() throws {
+        guard mlxRuntimeEnabled else {
+            print("Skipping Nemotron ASR MLX runtime test. Set MLXAUDIO_ENABLE_MLX_RUNTIME_TESTS=1 to enable.")
+            return
+        }
+        let model = try tinyModel()
+        let values = moduloFloatFixtureValues(count: 1 * 128 * 16, multiplier: 7, modulus: 23, divisor: 23.0)
+        let mel = MLXArray(values).reshaped([1, 128, 16])
+        // Calibrate on the same encoder input `decode` sees.
+        let features = mel.asType(model.computeDType)
+        let prompted = model.applyPrompt(model.encoder(features, attContextSize: [4, 1]).0, language: "en-US")
+        try #require(try calibrateBlankBias(model, prompted))
+
+        let offline = model.decode(mel: mel, language: "en-US", attContextSize: [4, 1])
+        let offlineIds = offline.sentences.flatMap(\.tokens).map(\.id)
+
+        let state = NemotronASRStreamRNNTState(blankToken: model.blankTokenID)
+        model.cacheAwareStreamEncode(mel, language: "en-US") { chunk in
+            model.streamRNNTDecode(chunk, state: state, frameSeconds: 0.08)
+        }
+        // Same alignment pass as `decode`, so both lists are ordered the same way.
+        let streamIds = NemoAlignment.tokensToSentences(state.results).flatMap(\.tokens).map(\.id)
+
+        #expect(!offlineIds.isEmpty)
+        #expect(streamIds == offlineIds)
     }
 }
 
