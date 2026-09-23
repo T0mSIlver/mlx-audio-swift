@@ -23,6 +23,9 @@ import MLXAudioCore
 //   * `finish()` reproduces the offline tail zero-pad ⇒ final transcript == generate().
 
 /// Persistent incremental-encoder state carried across `step` calls.
+///
+/// The caches are class instances, so a copy of this state shares them with the
+/// original: feeding one copy advances the caches of both.
 struct VoxtralRealtimeStreamEncoderState {
     let caches: [VoxtralRealtimeEncoderStreamKVCache]
     var blockBase = 0   // absolute conv-frame index where the current sw-block began
