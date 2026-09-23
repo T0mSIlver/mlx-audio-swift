@@ -76,6 +76,10 @@ public final class VoxtralRealtimeModel: Module, STTGenerationModel {
             if token == config.eosTokenId || generated.count > generationParameters.maxTokens {
                 break
             }
+            // The loop ends after this position, so nothing reads the next prediction.
+            if pos + 1 == context.nAudioTotal {
+                break
+            }
 
             let tokenEmbed = decoder.embedToken(tokenId: token)
             let inputEmbed: MLXArray
@@ -237,6 +241,10 @@ public final class VoxtralRealtimeModel: Module, STTGenerationModel {
                 }
 
                 if token == config.eosTokenId || generated.count > generationParameters.maxTokens {
+                    break
+                }
+                // The loop ends after this position, so nothing reads the next prediction.
+                if pos + 1 == context.nAudioTotal {
                     break
                 }
 

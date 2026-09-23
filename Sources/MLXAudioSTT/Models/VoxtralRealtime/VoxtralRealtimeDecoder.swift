@@ -362,11 +362,13 @@ final class VoxtralRealtimeDecoder: Module {
 
     init(_ config: VoxtralRealtimeDecoderConfig) {
         self.config = config
-        self.ropeInvFreq = ArrayBox(
-            VoxtralRealtimeDecoderAttention.ropeInvFreq(
-                headDim: config.headDim, ropeTheta: config.ropeTheta
-            )
+        let invFreq = VoxtralRealtimeDecoderAttention.ropeInvFreq(
+            headDim: config.headDim, ropeTheta: config.ropeTheta
         )
+        // Evaluate now: `eval(model)` does not reach the box, and a lazy array shared
+        // by concurrent forward passes would be evaluated from two threads.
+        MLX.eval(invFreq)
+        self.ropeInvFreq = ArrayBox(invFreq)
         self._tokEmbeddings.wrappedValue = Embedding(
             embeddingCount: config.vocabSize,
             dimensions: config.dim
