@@ -209,17 +209,21 @@ final class VoxtralRealtimeDecoderAttention: Module {
 
     }
 
+    /// The RoPE inverse frequencies. They depend only on the config, so the decoder
+    /// builds them once and every forward pass reuses the evaluated array.
+    fileprivate static func ropeInvFreq(headDim: Int, ropeTheta: Float) -> MLXArray {
+        let idx = MLXArray(stride(from: 0, to: headDim, by: 2)).asType(.float32)
+        return 1.0 / MLX.pow(MLXArray(ropeTheta), idx / Float(headDim))
+    }
+
     /// Interleaved-RoPE cos/sin tables for `positions`. Every decoder layer rotates
     /// by the same tables, so the decoder builds them once per forward pass instead
     /// of once per layer — same operations, bit-identical outputs, `nLayers`× fewer
     /// tiny kernel launches per decoded token.
     fileprivate static func ropeFrequencies(
         positions: MLXArray,
-        headDim: Int,
-        ropeTheta: Float
+        ropeInvFreq: MLXArray
     ) -> (MLXArray, MLXArray) {
-        let idx = MLXArray(stride(from: 0, to: headDim, by: 2)).asType(.float32)
-        let ropeInvFreq = 1.0 / MLX.pow(MLXArray(ropeTheta), idx / Float(headDim))
         let angles = positions.asType(.float32).expandedDimensions(axis: 1) * ropeInvFreq.expandedDimensions(axis: 0)
         return (MLX.cos(angles), MLX.sin(angles))
     }
@@ -349,8 +353,20 @@ final class VoxtralRealtimeDecoder: Module {
 
     var adaScales: [MLXArray?]?
 
+    /// Boxed so it stays out of the module's parameters.
+    private final class ArrayBox {
+        let value: MLXArray
+        init(_ value: MLXArray) { self.value = value }
+    }
+    private let ropeInvFreq: ArrayBox
+
     init(_ config: VoxtralRealtimeDecoderConfig) {
         self.config = config
+        self.ropeInvFreq = ArrayBox(
+            VoxtralRealtimeDecoderAttention.ropeInvFreq(
+                headDim: config.headDim, ropeTheta: config.ropeTheta
+            )
+        )
         self._tokEmbeddings.wrappedValue = Embedding(
             embeddingCount: config.vocabSize,
             dimensions: config.dim
@@ -397,8 +413,7 @@ final class VoxtralRealtimeDecoder: Module {
         // Shared by every layer — see `VoxtralRealtimeDecoderAttention.ropeFrequencies`.
         let (ropeCos, ropeSin) = VoxtralRealtimeDecoderAttention.ropeFrequencies(
             positions: positions,
-            headDim: config.headDim,
-            ropeTheta: config.ropeTheta
+            ropeInvFreq: ropeInvFreq.value
         )
 
         var newCache: [VoxtralRealtimeDecoderKVCache?] = []
