@@ -61,6 +61,25 @@ enum NemotronASRAudio {
         return mel.expandedDimensions(axis: 0).asType(originalDType)
     }
 
+    /// Window and mel filterbank for `config`, built once per stream session.
+    struct MelBasis {
+        let window: MLXArray
+        let filters: MLXArray
+
+        init(config: NemotronASRPreprocessConfig) {
+            window = NemotronASRAudio.makeWindow(
+                name: config.window, winLength: config.winLength, fftLength: config.nFft
+            )
+            filters = melFilters(
+                sampleRate: config.sampleRate,
+                nFft: config.nFft,
+                nMels: config.features,
+                norm: "slaney",
+                melScale: .slaney
+            ).asType(.float32)
+        }
+    }
+
     /// Mel frames `[first, end)` of `logMelSpectrogram(samples)` for NA normalization,
     /// computed from only the samples those frames cover. Returns `(1, end - first, F)`.
     ///
@@ -77,8 +96,10 @@ enum NemotronASRAudio {
         offset: Int = 0,
         first: Int,
         end: Int,
-        config: NemotronASRPreprocessConfig
+        config: NemotronASRPreprocessConfig,
+        basis: MelBasis? = nil
     ) -> MLXArray {
+        let basis = basis ?? MelBasis(config: config)
         let total = offset + samples.count
         let hop = config.hopLength
         let nFft = config.nFft
@@ -109,27 +130,19 @@ enum NemotronASRAudio {
         if hi - max(srcHi, lo) > 0 { parts.append(MLXArray.zeros([hi - max(srcHi, lo)])) }
         let segment = parts.count == 1 ? parts[0] : MLX.concatenated(parts, axis: 0)
 
-        let window = makeWindow(name: config.window, winLength: config.winLength, fftLength: nFft)
         let frames = asStrided(segment, [count, nFft], strides: [hop, 1], offset: 0)
-        let stftOutput = MLXFFT.rfft(frames * window, axis: 1)
+        let stftOutput = MLXFFT.rfft(frames * basis.window, axis: 1)
 
         var power = MLX.abs(stftOutput).square().asType(.float32)
         // A 1-row matmul dispatches to GEMV; pad to 2 rows to stay on the GEMM kernel.
         if count == 1 { power = MLX.concatenated([power, MLXArray.zeros(like: power)], axis: 0) }
-        let filters = melFilters(
-            sampleRate: config.sampleRate,
-            nFft: nFft,
-            nMels: config.features,
-            norm: "slaney",
-            melScale: .slaney
-        )
-        var mel = MLX.matmul(power, filters.asType(power.dtype))
+        var mel = MLX.matmul(power, basis.filters)
         if count == 1 { mel = mel[0..<1] }
         mel = MLX.log(mel + MLXArray(config.logZeroGuardValue, dtype: mel.dtype))
         return mel.expandedDimensions(axis: 0)
     }
 
-    private static func makeWindow(name: String, winLength: Int, fftLength: Int) -> MLXArray {
+    fileprivate static func makeWindow(name: String, winLength: Int, fftLength: Int) -> MLXArray {
         let base: MLXArray
         switch name.lowercased() {
         case "hann", "hanning":

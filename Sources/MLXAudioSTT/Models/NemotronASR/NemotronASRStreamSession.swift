@@ -106,6 +106,7 @@ public final class NemotronASRStreamSession {
     private var rawBuffer: [Float] = []
     private var rawOffset = 0
     private var sampleCount: Int { rawOffset + rawBuffer.count }
+    private let melBasis: NemotronASRAudio.MelBasis
     private let encState: NemotronASRStreamEncoderState
     private let rnntState: NemotronASRStreamRNNTState
     private var emittedText = ""
@@ -117,6 +118,7 @@ public final class NemotronASRStreamSession {
         self.chunkFrames = chunkFrames
         self.encState = NemotronASRStreamEncoderState(layers: model.encoder.layers.count)
         self.rnntState = NemotronASRStreamRNNTState(blankToken: model.blankTokenID)
+        self.melBasis = NemotronASRAudio.MelBasis(config: model.preprocessConfig)
         self.frameSeconds = Double(model.encoderConfig.subsamplingFactor * model.preprocessConfig.hopLength)
             / Double(model.preprocessConfig.sampleRate)
         let norm = model.preprocessConfig.normalize.lowercased()
@@ -192,7 +194,7 @@ public final class NemotronASRStreamSession {
                 return Delta(text: "", tokenIds: [])
             }
             mel = NemotronASRAudio.logMelFrames(
-                rawBuffer, offset: rawOffset, first: first, end: end, config: config
+                rawBuffer, offset: rawOffset, first: first, end: end, config: config, basis: melBasis
             )
             melOffset = first
         }
