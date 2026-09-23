@@ -34,6 +34,7 @@ extension NemotronASRModel {
         _ x: MLXArray,
         attnCache: MLXArray?,
         convCache: MLXArray?,
+        posEmb: inout (emb: MLXArray, cacheLen: Int)?,
         leftCache: Int,
         convLeft: Int
     ) -> (MLXArray, MLXArray, MLXArray) {
@@ -43,8 +44,12 @@ extension NemotronASRModel {
         let xn = block.normSelfAtt(residual)
         let cacheLen = attnCache?.shape[1] ?? 0
         let kv = attnCache == nil ? xn : MLX.concatenated([attnCache!, xn], axis: 1)
-        let posEmb = encoder.posEnc(xn, offset: cacheLen).1
-        residual = residual + block.selfAttn(xn, kv, kv, posEmb: posEmb, mask: nil)
+        // posEnc depends only on (chunk length, cacheLen, dtype); the chunk length is
+        // fixed within a chunk, so layers share one embedding instead of rebuilding it.
+        if posEmb == nil || posEmb!.cacheLen != cacheLen || posEmb!.emb.dtype != xn.dtype {
+            posEmb = (encoder.posEnc(xn, offset: cacheLen).1, cacheLen)
+        }
+        residual = residual + block.selfAttn(xn, kv, kv, posEmb: posEmb!.emb, mask: nil)
         let kvLen = kv.shape[1]
         let attnNext = kv[0..., max(0, kvLen - leftCache)..<kvLen, 0...]
 
@@ -145,10 +150,12 @@ extension NemotronASRModel {
             }
             state.emitted = base + hi
             var h = sub[0..., lo..<hi, 0...]
+            var posEmb: (emb: MLXArray, cacheLen: Int)?
             for li in encoder.layers.indices {
                 let r = nemoStreamBlock(
                     encoder.layers[li], h,
                     attnCache: state.attnCache[li], convCache: state.convCache[li],
+                    posEmb: &posEmb,
                     leftCache: leftCache, convLeft: convLeft
                 )
                 h = r.0
