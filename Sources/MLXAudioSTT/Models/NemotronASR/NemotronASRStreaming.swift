@@ -21,6 +21,8 @@ final class NemotronASRStreamEncoderState {
     var melCache: MLXArray?
     var emitted = 0   // subsampled frames already emitted to the decoder (absolute)
     var consumed = 0  // mel frames already consumed by the encoder (absolute)
+    // Prompt one-hot for the last chunk shape; every whole chunk has the same one.
+    var promptOneHot: (oneHot: MLXArray, time: Int, dtype: DType, promptIndex: Int)?
 
     init(layers: Int) {
         attnCache = [MLXArray?](repeating: nil, count: layers)
@@ -35,10 +37,12 @@ extension NemotronASRModel {
         attnCache: MLXArray?,
         convCache: MLXArray?,
         posEmb: inout (emb: MLXArray, cacheLen: Int)?,
+        half: inout MLXArray?,
         leftCache: Int,
         convLeft: Int
     ) -> (MLXArray, MLXArray, MLXArray) {
-        var residual = x + MLXArray(Float(0.5)).asType(x.dtype) * block.feedForward1(block.normFeedForward1(x))
+        if half == nil || half!.dtype != x.dtype { half = MLXArray(Float(0.5)).asType(x.dtype) }
+        var residual = x + half! * block.feedForward1(block.normFeedForward1(x))
 
         // cache-aware self-attention (Q = chunk, K/V = [cache ++ chunk])
         let xn = block.normSelfAtt(residual)
@@ -67,8 +71,8 @@ extension NemotronASRModel {
         y = silu(y)
         residual = residual + block.conv.pointwiseConv2(y)
 
-        residual = residual + MLXArray(Float(0.5)).asType(residual.dtype)
-            * block.feedForward2(block.normFeedForward2(residual))
+        if half!.dtype != residual.dtype { half = MLXArray(Float(0.5)).asType(residual.dtype) }
+        residual = residual + half! * block.feedForward2(block.normFeedForward2(residual))
         return (block.normOut(residual), attnNext, convNext)
     }
 
@@ -151,18 +155,34 @@ extension NemotronASRModel {
             state.emitted = base + hi
             var h = sub[0..., lo..<hi, 0...]
             var posEmb: (emb: MLXArray, cacheLen: Int)?
+            var half: MLXArray?
             for li in encoder.layers.indices {
                 let r = nemoStreamBlock(
                     encoder.layers[li], h,
                     attnCache: state.attnCache[li], convCache: state.convCache[li],
                     posEmb: &posEmb,
+                    half: &half,
                     leftCache: leftCache, convLeft: convLeft
                 )
                 h = r.0
                 state.attnCache[li] = r.1
                 state.convCache[li] = r.2
             }
-            onChunk(applyPrompt(h, language: language))
+            guard promptKernel != nil else {
+                onChunk(h)
+                continue
+            }
+            let promptIndex = resolvePromptIndex(language)
+            let t = h.shape[1]
+            if let c = state.promptOneHot, c.time == t, c.dtype == h.dtype, c.promptIndex == promptIndex,
+               c.oneHot.shape[0] == h.shape[0]
+            {
+                onChunk(applyPrompt(h, oneHot: c.oneHot))
+            } else {
+                let oneHot = promptOneHot(batch: h.shape[0], time: t, dtype: h.dtype, promptIndex: promptIndex)
+                state.promptOneHot = (oneHot, t, h.dtype, promptIndex)
+                onChunk(applyPrompt(h, oneHot: oneHot))
+            }
         }
     }
 }
