@@ -3637,6 +3637,7 @@ struct NemotronASRTests {
 
         let bias = model.joint.outputProj.bias!.asType(.float32).asArray(Float.self)
         let candidates = zip(margins, margins.dropFirst()).map { -($0 + $1) / 2 }
+        var tried: [String] = []
         for shift in candidates.reversed() {
             var shifted = bias
             shifted[blank] += shift
@@ -3646,7 +3647,12 @@ struct NemotronASRTests {
             )
             let run = perFrameRecomputeDecode(model, prompted)
             if accept(run) { return true }
+            tried.append(
+                "shift \(shift): ids \(run.ids.count) blank \(run.blankFrames) "
+                    + "maxPerFrame \(run.maxPerFrame) emissions \(run.emissionFrames.count)"
+            )
         }
+        print("calibrateBlankBias found no shift:\n" + tried.joined(separator: "\n"))
         return false
     }
 
@@ -3702,6 +3708,17 @@ struct NemotronASRTests {
         // Calibrate on the same encoder input `decode` sees.
         let features = mel.asType(model.computeDType)
         let prompted = model.applyPrompt(model.encoder(features, attContextSize: [4, 1]).0, language: "en-US")
+        // Special tokens are dropped from both outputs, so a random joint that favours
+        // one (<unk>, <en-US>) on every frame leaves nothing to compare. Push them down.
+        let vocab = model.vocabulary
+        var bias = model.joint.outputProj.bias!.asType(.float32).asArray(Float.self)
+        for id in vocab.indices where NemotronASRTokenizer.isSpecialToken(id, vocabulary: vocab) {
+            bias[id] -= 1000
+        }
+        try model.joint.outputProj.update(
+            parameters: ModuleParameters.unflattened(["bias": MLXArray(bias)]),
+            verify: .noUnusedKeys
+        )
         // Only needs blank frames and emitted tokens; the stricter conditions are
         // covered by streamRNNTDecodeMatchesPerFrameRecompute.
         try #require(try calibrateBlankBias(model, prompted) { run in
