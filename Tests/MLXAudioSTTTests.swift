@@ -3567,11 +3567,13 @@ struct NemotronASRTests {
 
     /// Greedy RNN-T that reruns the decoder and the full joint on every frame (the
     /// loop before the prediction cache). Returns the non-special token ids, the
-    /// frames left on blank, and the most symbols emitted on one frame.
+    /// frames left on blank, the most symbols emitted on one frame, and the frame
+    /// of every emission.
     private func perFrameRecomputeDecode(
         _ model: NemotronASRModel, _ prompted: MLXArray
-    ) -> (ids: [Int], blankFrames: Int, maxPerFrame: Int) {
+    ) -> (ids: [Int], blankFrames: Int, maxPerFrame: Int, emissionFrames: [Int]) {
         var ids: [Int] = []
+        var emissionFrames: [Int] = []
         var blankFrames = 0
         var maxPerFrame = 0
         var emittedHere = 0
@@ -3592,6 +3594,7 @@ struct NemotronASRTests {
             )
             if step.emittedToken {
                 emittedHere += 1
+                emissionFrames.append(time)
                 lastToken = token
                 decoderState = (hidden: out.1.hidden?.asType(frame.dtype), cell: out.1.cell?.asType(frame.dtype))
                 if !NemotronASRTokenizer.isSpecialToken(token, vocabulary: model.vocabulary) {
@@ -3607,12 +3610,13 @@ struct NemotronASRTests {
             time = step.nextTime
             newSymbols = step.nextNewSymbols
         }
-        return (ids, blankFrames, maxPerFrame)
+        return (ids, blankFrames, maxPerFrame, emissionFrames)
     }
 
     /// The random tiny model may predict blank everywhere or nowhere. Shift the
     /// joint's blank logit bias until the per-frame decode of `prompted` has blank
-    /// frames, emitted tokens and a frame with at least 2 symbols. Shifts sit midway
+    /// frames, emitted tokens, a frame with at least 2 symbols and an emission on a
+    /// frame that is not a multiple of 4. Shifts sit midway
     /// between the blank margins of neighbouring frames, away from argmax ties.
     private func calibrateBlankBias(_ model: NemotronASRModel, _ prompted: MLXArray) throws -> Bool {
         let blank = model.blankTokenID
@@ -3638,7 +3642,10 @@ struct NemotronASRTests {
                 verify: .noUnusedKeys
             )
             let run = perFrameRecomputeDecode(model, prompted)
-            if !run.ids.isEmpty && run.blankFrames > 0 && run.maxPerFrame >= 2 { return true }
+            if !run.ids.isEmpty && run.blankFrames > 0 && run.maxPerFrame >= 2
+                && run.emissionFrames.contains(where: { $0 % 4 != 0 }) {
+                return true
+            }
         }
         return false
     }
@@ -3662,10 +3669,15 @@ struct NemotronASRTests {
         #expect(!reference.ids.isEmpty)
         #expect(reference.blankFrames > 0)
         #expect(reference.maxPerFrame >= 2)
+        // The stream decode reads tokens 4 frames per sync; an emission off a
+        // multiple of 4 lands inside a batch, not at its start.
+        #expect(reference.emissionFrames.contains(where: { $0 % 4 != 0 }))
 
-        // Two chunks, so the cache also carries across calls.
+        // Two chunks, so the cache also carries across calls. The first chunk's length
+        // is not a multiple of 4, so it ends in a batch shorter than 4.
         let state = NemotronASRStreamRNNTState(blankToken: model.blankTokenID)
-        let split = frames / 2
+        let split = frames / 2 + 1
+        #expect(split % 4 != 0)
         model.streamRNNTDecode(prompted[0..., 0..<split, 0...], state: state, frameSeconds: 0.08)
         model.streamRNNTDecode(prompted[0..., split..<frames, 0...], state: state, frameSeconds: 0.08)
         #expect(state.results.map(\.id) == reference.ids)
