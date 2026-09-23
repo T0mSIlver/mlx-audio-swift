@@ -9,7 +9,9 @@ import Testing
 struct VoxtralRealtimeEncoderStreamKVCacheTests {
     @Test func appendsMatchConcatenationAcrossResets() {
         let width = 3
-        let capacity = 16
+        // Past two growth blocks, so the storage grows twice within the first window.
+        let capacity = 600
+        let appendSizes = [1, 100, 200, 7, 1, 291]
         var nextValue = 0
         func rows(_ count: Int) -> MLXArray {
             let values = (nextValue..<(nextValue + count * width)).map(Float.init)
@@ -21,7 +23,7 @@ struct VoxtralRealtimeEncoderStreamKVCacheTests {
         // Each window is filled by irregular appends that sum to `capacity`.
         for _ in 0..<3 {
             var reference: MLXArray?
-            for n in [1, 5, 2, 7, 1] {
+            for n in appendSizes {
                 let newKeys = rows(n)
                 let window = cache.append(keys: newKeys, values: newKeys + 0.5)
                 reference = reference.map { MLX.concatenated([$0, newKeys], axis: 0) } ?? newKeys
@@ -32,6 +34,7 @@ struct VoxtralRealtimeEncoderStreamKVCacheTests {
                 #expect(MLX.arrayEqual(window.values, reference! + 0.5).item(Bool.self))
             }
             #expect(cache.count == capacity)
+            #expect(cache.keys?.shape[0] == capacity)
             cache.reset()
             #expect(cache.count == 0)
         }

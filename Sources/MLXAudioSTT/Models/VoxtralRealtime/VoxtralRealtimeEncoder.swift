@@ -8,11 +8,11 @@ struct VoxtralRealtimeEncoderKVCache {
     var positionOffset: Int
 }
 
-/// Streaming encoder key/value cache for one layer: storage preallocated at
-/// `capacity` rows, new rows written with a slice update, attention reading the
-/// filled prefix. The stream session resets it at every sliding-window boundary
-/// (see `feedIncremental`), so it never trims and never exceeds `slidingWindow`
-/// rows; `reset` keeps the storage for the next window.
+/// Streaming encoder key/value cache for one layer: storage that grows in
+/// `growthBlock`-row steps up to `capacity` rows, new rows written with a slice
+/// update, attention reading the filled prefix. The stream session resets it at
+/// every sliding-window boundary (see `feedIncremental`), so it never trims and
+/// never exceeds `slidingWindow` rows; `reset` keeps the storage for the next window.
 ///
 /// MLX runs the slice update in place only while nothing else references the
 /// storage buffer. It is a class, so `append` changes it for every holder.
@@ -21,6 +21,7 @@ final class VoxtralRealtimeEncoderStreamKVCache {
     private(set) var values: MLXArray? // [capacity, n_heads * head_dim]
     private(set) var count = 0
     let capacity: Int
+    static let growthBlock = 256
 
     init(capacity: Int) {
         self.capacity = capacity
@@ -39,8 +40,22 @@ final class VoxtralRealtimeEncoderStreamKVCache {
         precondition(count + n <= capacity, "encoder stream cache overflow")
         if keys == nil || keys!.dtype != newKeys.dtype || keys!.shape[1] != newKeys.shape[1] {
             precondition(count == 0, "encoder stream cache changed dtype or width mid-window")
-            keys = MLXArray.zeros([capacity, newKeys.shape[1]], dtype: newKeys.dtype)
-            values = MLXArray.zeros([capacity, newValues.shape[1]], dtype: newValues.dtype)
+            keys = nil
+            values = nil
+        }
+        let allocated = keys?.shape[0] ?? 0
+        if count + n > allocated {
+            // Grow a block at a time, so a short stream does not hold a whole window.
+            let block = Self.growthBlock
+            let grown = min(capacity, ((count + n + block - 1) / block) * block)
+            var grownKeys = MLXArray.zeros([grown, newKeys.shape[1]], dtype: newKeys.dtype)
+            var grownValues = MLXArray.zeros([grown, newValues.shape[1]], dtype: newValues.dtype)
+            if count > 0, let oldKeys = keys, let oldValues = values {
+                grownKeys[0..<count] = oldKeys[0..<count]
+                grownValues[0..<count] = oldValues[0..<count]
+            }
+            keys = grownKeys
+            values = grownValues
         }
         let range = count..<(count + n)
         keys![range] = newKeys
