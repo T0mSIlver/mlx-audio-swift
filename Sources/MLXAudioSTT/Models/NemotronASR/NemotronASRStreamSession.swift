@@ -193,10 +193,11 @@ public final class NemotronASRStreamSession {
                 if final { done = true; Memory.clearCache() }
                 return Delta(text: "", tokenIds: [])
             }
-            mel = NemotronASRAudio.logMelFrames(
+            let frames = NemotronASRAudio.streamMelFrames(
                 rawBuffer, offset: rawOffset, first: first, end: end, config: config, basis: melBasis
             )
-            melOffset = first
+            mel = frames.mel
+            melOffset = frames.melOffset
         }
 
         let firstNew = rnntState.results.count
@@ -211,9 +212,11 @@ public final class NemotronASRStreamSession {
         ) { prompted in
             model.streamRNNTDecode(prompted, state: rnntState, frameSeconds: frameSeconds)
         }
-        if !final && sampleCount >= max(config.nFft, config.padTo) {
-            // Keep only what the next step's first frame needs: from `consumed` rounded
-            // down to even, minus the STFT half-window and one pre-emphasis sample.
+        if !final && sampleCount >= max(config.nFft, config.padTo)
+            && 1 + sampleCount / config.hopLength >= NemotronASRAudio.gemmMinRows(config: config) {
+            // Once `streamMelFrames` stops needing the whole stream, keep only what the
+            // next step's first frame needs: from `consumed` rounded down to even, minus
+            // the STFT half-window and one pre-emphasis sample.
             let keepFrom = max(0, (encState.consumed & ~1) * config.hopLength - config.nFft / 2 - 1)
             if keepFrom > rawOffset {
                 rawBuffer.removeFirst(keepFrom - rawOffset)

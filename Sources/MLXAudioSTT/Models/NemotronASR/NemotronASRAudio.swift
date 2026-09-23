@@ -80,6 +80,39 @@ enum NemotronASRAudio {
         }
     }
 
+    /// Row count from which the mel matmul `(rows, K) @ (K, F)`, K = nFft/2 + 1, runs on
+    /// MLX's regular Metal GEMM. With fewer rows (K >= max(rows, F)) it runs split-K,
+    /// whose partial sums, and their count, depend on the row count; one row runs GEMV.
+    /// The regular GEMM adds K in the same order for any row count, so frames computed
+    /// with at least this many rows match a whole-buffer mel that has at least as many.
+    static func gemmMinRows(config: NemotronASRPreprocessConfig) -> Int {
+        config.nFft / 2 + 2
+    }
+
+    /// Mel frames `[first, end)` as the stream session computes them from the stream
+    /// so far (`samples`, starting at stream sample `offset`), with the values
+    /// `logMelSpectrogram(stream)` gives them. Returns the mel and the stream frame
+    /// index of its first row. Below `gemmMinRows` total frames the whole-buffer mel
+    /// ran split-K, so this returns the whole-buffer mel, which needs `offset == 0`.
+    static func streamMelFrames(
+        _ samples: [Float],
+        offset: Int,
+        first: Int,
+        end: Int,
+        config: NemotronASRPreprocessConfig,
+        basis: MelBasis
+    ) -> (mel: MLXArray, melOffset: Int) {
+        let totalMel = 1 + (offset + samples.count) / config.hopLength
+        if totalMel < gemmMinRows(config: config) {
+            precondition(offset == 0, "streamMelFrames: the whole-buffer mel needs the whole stream")
+            return (logMelSpectrogram(MLXArray(samples), config: config), 0)
+        }
+        return (
+            logMelFrames(samples, offset: offset, first: first, end: end, config: config, basis: basis),
+            first
+        )
+    }
+
     /// Mel frames `[first, end)` of `logMelSpectrogram(samples)` for NA normalization,
     /// computed from only the samples those frames cover. Returns `(1, end - first, F)`.
     ///
@@ -87,6 +120,7 @@ enum NemotronASRAudio {
     /// and `end` is even or equals the full frame count: MLX's float RFFT packs rows
     /// (2i, 2i+1) into one complex FFT (an odd last row is packed with itself), so a
     /// row's rounding depends on its partner. Those bounds keep every partner the same.
+    /// The full computation must also have at least `gemmMinRows` frames.
     /// Callers must use the full path when `padTo` would pad the audio.
     ///
     /// `samples` may be a suffix of the audio: `samples[0]` is audio sample `offset`,
@@ -134,10 +168,13 @@ enum NemotronASRAudio {
         let stftOutput = MLXFFT.rfft(frames * basis.window, axis: 1)
 
         var power = MLX.abs(stftOutput).square().asType(.float32)
-        // A 1-row matmul dispatches to GEMV; pad to 2 rows to stay on the GEMM kernel.
-        if count == 1 { power = MLX.concatenated([power, MLXArray.zeros(like: power)], axis: 0) }
+        // Zero rows up to `gemmMinRows` keep the matmul on the regular GEMM (see there).
+        let rows = gemmMinRows(config: config)
+        if count < rows {
+            power = MLX.concatenated([power, MLXArray.zeros([rows - count, power.shape[1]])], axis: 0)
+        }
         var mel = MLX.matmul(power, basis.filters)
-        if count == 1 { mel = mel[0..<1] }
+        if count < rows { mel = mel[0..<count] }
         mel = MLX.log(mel + MLXArray(config.logZeroGuardValue, dtype: mel.dtype))
         return mel.expandedDimensions(axis: 0)
     }
