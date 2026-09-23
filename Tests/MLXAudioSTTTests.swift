@@ -3614,11 +3614,14 @@ struct NemotronASRTests {
     }
 
     /// The random tiny model may predict blank everywhere or nowhere. Shift the
-    /// joint's blank logit bias until the per-frame decode of `prompted` has blank
-    /// frames, emitted tokens, a frame with at least 2 symbols and an emission on a
-    /// frame that is not a multiple of 4. Shifts sit midway
-    /// between the blank margins of neighbouring frames, away from argmax ties.
-    private func calibrateBlankBias(_ model: NemotronASRModel, _ prompted: MLXArray) throws -> Bool {
+    /// joint's blank logit bias until the per-frame decode of `prompted` satisfies
+    /// `accept`. Shifts sit midway between the blank margins of neighbouring frames,
+    /// away from argmax ties.
+    private func calibrateBlankBias(
+        _ model: NemotronASRModel,
+        _ prompted: MLXArray,
+        accept: ((ids: [Int], blankFrames: Int, maxPerFrame: Int, emissionFrames: [Int])) -> Bool
+    ) throws -> Bool {
         let blank = model.blankTokenID
         let pred = model.decoder(nil, state: nil).0.asType(prompted.dtype)
         let logits = model.joint(prompted, pred)  // (1, T, 1, J)
@@ -3642,10 +3645,7 @@ struct NemotronASRTests {
                 verify: .noUnusedKeys
             )
             let run = perFrameRecomputeDecode(model, prompted)
-            if !run.ids.isEmpty && run.blankFrames > 0 && run.maxPerFrame >= 2
-                && run.emissionFrames.contains(where: { $0 % 4 != 0 }) {
-                return true
-            }
+            if accept(run) { return true }
         }
         return false
     }
@@ -3663,7 +3663,12 @@ struct NemotronASRTests {
         let mel = MLXArray(values).reshaped([1, 128, 16])
         let prompted = model.applyPrompt(model.encoder(mel, attContextSize: [4, 1]).0, language: "en-US")
         let frames = prompted.shape[1]
-        try #require(try calibrateBlankBias(model, prompted))
+        // Blank frames, emitted tokens, a frame with 2+ symbols, and an emission on
+        // a frame that is not a multiple of 4 (inside a 4-frame sync batch).
+        try #require(try calibrateBlankBias(model, prompted) { run in
+            !run.ids.isEmpty && run.blankFrames > 0 && run.maxPerFrame >= 2
+                && run.emissionFrames.contains(where: { $0 % 4 != 0 })
+        })
 
         let reference = perFrameRecomputeDecode(model, prompted)
         #expect(!reference.ids.isEmpty)
@@ -3697,7 +3702,11 @@ struct NemotronASRTests {
         // Calibrate on the same encoder input `decode` sees.
         let features = mel.asType(model.computeDType)
         let prompted = model.applyPrompt(model.encoder(features, attContextSize: [4, 1]).0, language: "en-US")
-        try #require(try calibrateBlankBias(model, prompted))
+        // Only needs blank frames and emitted tokens; the stricter conditions are
+        // covered by streamRNNTDecodeMatchesPerFrameRecompute.
+        try #require(try calibrateBlankBias(model, prompted) { run in
+            !run.ids.isEmpty && run.blankFrames > 0
+        })
 
         let offline = model.decode(mel: mel, language: "en-US", attContextSize: [4, 1])
         let offlineIds = offline.sentences.flatMap(\.tokens).map(\.id)
