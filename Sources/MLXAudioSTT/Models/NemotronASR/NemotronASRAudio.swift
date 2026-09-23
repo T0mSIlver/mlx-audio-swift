@@ -68,35 +68,42 @@ enum NemotronASRAudio {
     /// and `end` is even or equals the full frame count: MLX's float RFFT packs rows
     /// (2i, 2i+1) into one complex FFT (an odd last row is packed with itself), so a
     /// row's rounding depends on its partner. Those bounds keep every partner the same.
-    /// Callers must use the full path when `padTo` would pad `samples`.
+    /// Callers must use the full path when `padTo` would pad the audio.
+    ///
+    /// `samples` may be a suffix of the audio: `samples[0]` is audio sample `offset`,
+    /// and it must include sample `first*hop - nFft/2 - 1` (pre-emphasis context).
     static func logMelFrames(
         _ samples: [Float],
+        offset: Int = 0,
         first: Int,
         end: Int,
         config: NemotronASRPreprocessConfig
     ) -> MLXArray {
+        let total = offset + samples.count
         let hop = config.hopLength
         let nFft = config.nFft
         let half = nFft / 2
         let count = end - first
         // Padded-signal coordinates [first*hop, (end-1)*hop + nFft) map to samples
-        // shifted by -half; outside [0, samples.count) the STFT pad is zero.
+        // shifted by -half; outside [0, total) the STFT pad is zero.
         let lo = first * hop - half
         let hi = (end - 1) * hop - half + nFft
         let srcLo = max(lo, 0)
-        let srcHi = min(hi, samples.count)
+        let srcHi = min(hi, total)
 
         var parts: [MLXArray] = []
         if srcLo - lo > 0 { parts.append(MLXArray.zeros([srcLo - lo])) }
         if srcHi > srcLo {
-            if config.preemph > 0 && samples.count > 1 {
+            if config.preemph > 0 && total > 1 {
                 // y[i] = x[i] - p*x[i-1], y[0] = x[0]: same elementwise ops as the full path.
                 let ctxLo = max(srcLo - 1, 0)
-                let x = MLXArray(Array(samples[ctxLo..<srcHi]))
+                precondition(ctxLo >= offset, "logMelFrames: samples start after the needed context")
+                let x = MLXArray(Array(samples[(ctxLo - offset)..<(srcHi - offset)]))
                 let rest = x[1...] - Float(config.preemph) * x[..<(x.shape[0] - 1)]
                 parts.append(srcLo == 0 ? MLX.concatenated([x[0..<1], rest], axis: 0) : rest)
             } else {
-                parts.append(MLXArray(Array(samples[srcLo..<srcHi])))
+                precondition(srcLo >= offset, "logMelFrames: samples start after the needed context")
+                parts.append(MLXArray(Array(samples[(srcLo - offset)..<(srcHi - offset)])))
             }
         }
         if hi - max(srcHi, lo) > 0 { parts.append(MLXArray.zeros([hi - max(srcHi, lo)])) }

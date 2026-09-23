@@ -102,7 +102,10 @@ public final class NemotronASRStreamSession {
     private let chunkFrames: Int?
     private let frameSeconds: Double
 
+    // Samples the next step can still need; `rawBuffer[0]` is stream sample `rawOffset`.
     private var rawBuffer: [Float] = []
+    private var rawOffset = 0
+    private var sampleCount: Int { rawOffset + rawBuffer.count }
     private let encState: NemotronASRStreamEncoderState
     private let rnntState: NemotronASRStreamRNNTState
     private var emittedText = ""
@@ -161,7 +164,7 @@ public final class NemotronASRStreamSession {
 
     private func advance(final: Bool) -> Delta {
         guard !done else { return Delta(text: "", tokenIds: []) }
-        guard !rawBuffer.isEmpty else {
+        guard sampleCount > 0 else {
             if final { done = true }
             return Delta(text: "", tokenIds: [])
         }
@@ -170,7 +173,8 @@ public final class NemotronASRStreamSession {
         let mel: MLXArray
         let melOffset: Int
         let limit: Int
-        if (config.padTo > 0 && rawBuffer.count < config.padTo) || rawBuffer.count < config.nFft {
+        if (config.padTo > 0 && sampleCount < config.padTo) || sampleCount < config.nFft {
+            // Short buffers are never trimmed, so `rawBuffer` is the whole stream here.
             mel = NemotronASRAudio.logMelSpectrogram(MLXArray(rawBuffer), config: config)  // (1, T, F)
             melOffset = 0
             limit = final ? mel.shape[1] : frozenMelFrames(totalMel: mel.shape[1])
@@ -179,7 +183,7 @@ public final class NemotronASRStreamSession {
             // bounds are widened to the RFFT row pairs of the full computation (see
             // `logMelFrames`), so every frame matches the whole-buffer mel bit for bit.
             let half = config.nFft / 2
-            let totalMel = 1 + (rawBuffer.count + 2 * half - config.nFft) / config.hopLength
+            let totalMel = 1 + (sampleCount + 2 * half - config.nFft) / config.hopLength
             limit = final ? totalMel : frozenMelFrames(totalMel: totalMel)
             let first = encState.consumed & ~1
             let end = limit % 2 == 0 ? limit : min(limit + 1, totalMel)
@@ -187,7 +191,9 @@ public final class NemotronASRStreamSession {
                 if final { done = true; Memory.clearCache() }
                 return Delta(text: "", tokenIds: [])
             }
-            mel = NemotronASRAudio.logMelFrames(rawBuffer, first: first, end: end, config: config)
+            mel = NemotronASRAudio.logMelFrames(
+                rawBuffer, offset: rawOffset, first: first, end: end, config: config
+            )
             melOffset = first
         }
 
@@ -202,6 +208,15 @@ public final class NemotronASRStreamSession {
             melOffset: melOffset
         ) { prompted in
             model.streamRNNTDecode(prompted, state: rnntState, frameSeconds: frameSeconds)
+        }
+        if !final && sampleCount >= max(config.nFft, config.padTo) {
+            // Keep only what the next step's first frame needs: from `consumed` rounded
+            // down to even, minus the STFT half-window and one pre-emphasis sample.
+            let keepFrom = max(0, (encState.consumed & ~1) * config.hopLength - config.nFft / 2 - 1)
+            if keepFrom > rawOffset {
+                rawBuffer.removeFirst(keepFrom - rawOffset)
+                rawOffset = keepFrom
+            }
         }
 
         // Bound the lazy graph across steps: materialize the caches the next step
@@ -240,8 +255,8 @@ public final class NemotronASRStreamSession {
     private func frozenMelFrames(totalMel: Int) -> Int {
         let hop = model.preprocessConfig.hopLength
         let half = model.preprocessConfig.nFft / 2
-        guard rawBuffer.count >= half else { return 0 }
-        let largestFrozen = (rawBuffer.count - half) / hop
+        guard sampleCount >= half else { return 0 }
+        let largestFrozen = (sampleCount - half) / hop
         return min(totalMel, largestFrozen + 1)
     }
 }

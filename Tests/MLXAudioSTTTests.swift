@@ -3424,6 +3424,13 @@ struct NemotronASRTests {
             let expected = full[0..., first..<end, 0...]
             #expect(part.shape == expected.shape)
             #expect(MLX.all(part .== expected).item(Bool.self), "frames \(first)..<\(end)")
+
+            // Same frames from a trimmed buffer that starts at the first needed sample.
+            let offset = max(0, first * config.hopLength - config.nFft / 2 - 1)
+            let trimmed = NemotronASRAudio.logMelFrames(
+                Array(samples[offset...]), offset: offset, first: first, end: end, config: config
+            )
+            #expect(MLX.all(trimmed .== expected).item(Bool.self), "trimmed frames \(first)..<\(end)")
         }
     }
 
