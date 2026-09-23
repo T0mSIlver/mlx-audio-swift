@@ -3564,6 +3564,54 @@ struct NemotronASRTests {
         let coarse = sessionText(model, audio, feed: 1500)
         #expect(fine == coarse)
     }
+
+    /// The stream RNN-T decode reuses the prediction output on blank frames; it must
+    /// emit the same tokens as recomputing the decoder and joint on every frame.
+    @Test func streamRNNTDecodeMatchesPerFrameRecompute() throws {
+        guard mlxRuntimeEnabled else {
+            print("Skipping Nemotron ASR MLX runtime test. Set MLXAUDIO_ENABLE_MLX_RUNTIME_TESTS=1 to enable.")
+            return
+        }
+        let model = try tinyModel()
+        let values = moduloFloatFixtureValues(count: 1 * 64 * 16, multiplier: 7, modulus: 23, divisor: 23.0)
+        let mel = MLXArray(values).reshaped([1, 64, 16])
+        let prompted = model.applyPrompt(model.encoder(mel, attContextSize: [4, 1]).0, language: "en-US")
+        let frames = prompted.shape[1]
+
+        var expected: [Int] = []
+        var lastToken = model.blankTokenID
+        var decoderState: NemoLSTMState?
+        var time = 0
+        var newSymbols = 0
+        while time < frames {
+            let frame = prompted[0..., time..<(time + 1), 0...]
+            let currentToken: MLXArray? = lastToken == model.blankTokenID
+                ? nil
+                : MLXArray(Int32(lastToken)).reshaped([1, 1]).asType(.int32)
+            let out = model.decoder(currentToken, state: decoderState)
+            let token = model.joint(frame, out.0.asType(frame.dtype)).argMax(axis: -1).item(Int.self)
+            let step = NemoDecodingLogic.rnntStep(
+                predictedToken: token, blankToken: model.blankTokenID, time: time,
+                newSymbols: newSymbols, maxSymbols: model.maxSymbols
+            )
+            if step.emittedToken {
+                lastToken = token
+                decoderState = (hidden: out.1.hidden?.asType(frame.dtype), cell: out.1.cell?.asType(frame.dtype))
+                if !NemotronASRTokenizer.isSpecialToken(token, vocabulary: model.vocabulary) {
+                    expected.append(token)
+                }
+            }
+            time = step.nextTime
+            newSymbols = step.nextNewSymbols
+        }
+
+        // Two chunks, so the cache also carries across calls.
+        let state = NemotronASRStreamRNNTState(blankToken: model.blankTokenID)
+        let split = frames / 2
+        model.streamRNNTDecode(prompted[0..., 0..<split, 0...], state: state, frameSeconds: 0.08)
+        model.streamRNNTDecode(prompted[0..., split..<frames, 0...], state: state, frameSeconds: 0.08)
+        #expect(state.results.map(\.id) == expected)
+    }
 }
 
 struct VoxtralRealtimeSTTTests {
