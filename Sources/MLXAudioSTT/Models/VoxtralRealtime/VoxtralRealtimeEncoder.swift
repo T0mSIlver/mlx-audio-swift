@@ -142,7 +142,34 @@ final class VoxtralRealtimeCausalConv1d: Module {
 struct VoxtralRealtimeEncoderAttentionInputs {
     let ropeCos: MLXArray
     let ropeSin: MLXArray
+    /// `ropeCos`/`ropeSin` as `[seqLen, 1, headDim / 2]` in the q/k dtype: the
+    /// operands `voxtralApplyInterleavedRoPE` casts on every call, cast once per
+    /// pass instead of twice per layer.
+    let ropeCosCast: MLXArray
+    let ropeSinCast: MLXArray
     let mask: MLXFast.ScaledDotProductAttentionMaskMode
+
+    /// `voxtralApplyInterleavedRoPE(x, cos: ropeCos, sin: ropeSin, ...)` with the
+    /// cast tables reused: the same operations on the same values.
+    func applyRoPE(_ x: MLXArray, nHeads: Int, headDim: Int) -> MLXArray {
+        guard x.dtype == ropeCosCast.dtype else {
+            return voxtralApplyInterleavedRoPE(
+                x, cos: ropeCos, sin: ropeSin, nHeads: nHeads, headDim: headDim)
+        }
+        let seqLen = x.shape[0]
+        let reshaped = x.reshaped(seqLen, nHeads, headDim / 2, 2)
+        let x1 = reshaped[0..., 0..., 0..., 0]
+        let x2 = reshaped[0..., 0..., 0..., 1]
+
+        let o1 = x1 * ropeCosCast - x2 * ropeSinCast
+        let o2 = x2 * ropeCosCast + x1 * ropeSinCast
+
+        let out = MLX.concatenated(
+            [o1.expandedDimensions(axis: -1), o2.expandedDimensions(axis: -1)],
+            axis: -1
+        )
+        return out.reshaped(seqLen, nHeads * headDim)
+    }
 
     /// Build the shared inputs for one forward pass of `seqLen` frames at
     /// `positions`, extending `caches`. One mask can serve every layer because the
@@ -231,6 +258,8 @@ struct VoxtralRealtimeEncoderAttentionInputs {
         return VoxtralRealtimeEncoderAttentionInputs(
             ropeCos: cos,
             ropeSin: sin,
+            ropeCosCast: cos.expandedDimensions(axis: 1).asType(dtype),
+            ropeSinCast: sin.expandedDimensions(axis: 1).asType(dtype),
             mask: maskMode
         )
     }
@@ -271,10 +300,8 @@ final class VoxtralRealtimeEncoderAttention: Module {
         var k = wk(x)
         let v = wv(x)
 
-        q = voxtralApplyInterleavedRoPE(
-            q, cos: inputs.ropeCos, sin: inputs.ropeSin, nHeads: nHeads, headDim: headDim)
-        k = voxtralApplyInterleavedRoPE(
-            k, cos: inputs.ropeCos, sin: inputs.ropeSin, nHeads: nHeads, headDim: headDim)
+        q = inputs.applyRoPE(q, nHeads: nHeads, headDim: headDim)
+        k = inputs.applyRoPE(k, nHeads: nHeads, headDim: headDim)
         return (q, k, v)
     }
 
