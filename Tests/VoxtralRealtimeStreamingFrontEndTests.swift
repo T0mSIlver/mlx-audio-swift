@@ -206,6 +206,53 @@ struct VoxtralRealtimeStreamingFrontEndTests {
         #expect(joined.trimmingCharacters(in: .whitespacesAndNewlines) == offline.text)
     }
 
+    /// With tokens that split multi-byte characters, each `generateStream` delta must
+    /// equal what the previous algorithm yielded: re-decode the whole transcript, then
+    /// take the new suffix, or the whole text when the old text is no longer a prefix.
+    @Test func generateStreamDeltasMatchWholeTranscriptDecoding() async throws {
+        let fixtureDir = try Self.makeRandomFixture(
+            eosTokenId: 99,
+            vocabBytes: [[0x61], [0xC3], [0xA9], [0xE2], [0x82, 0xAC], [0xF0, 0x9F], [0x98], [0x80]]
+        )
+        defer { try? FileManager.default.removeItem(at: fixtureDir) }
+        let model = try VoxtralRealtimeModel.fromDirectory(fixtureDir)
+        let samples = Self.sweep(10 * 16_000)
+        let maxTokens = 500
+        let params = STTGenerateParameters(maxTokens: maxTokens, temperature: 0.0)
+
+        var deltas: [String] = []
+        for try await event in model.generateStream(
+            audio: MLXArray(samples), generationParameters: params
+        ) {
+            if case .token(let delta) = event { deltas.append(delta) }
+        }
+
+        // The session's token ids equal the offline ones (see the tests above).
+        let session = model.makeStreamSession(maxTokens: maxTokens)
+        _ = session.step(samples)
+        _ = session.finish()
+
+        var expected: [String] = []
+        var bytes: [UInt8] = []
+        var previousText = ""
+        for token in session.tokens {
+            bytes += model.streamingTokenBytes(token)
+            let textSoFar = String(decoding: bytes, as: UTF8.self)
+            guard textSoFar != previousText else { continue }
+            let delta = textSoFar.hasPrefix(previousText)
+                ? String(textSoFar.dropFirst(previousText.count))
+                : textSoFar
+            if !delta.isEmpty { expected.append(delta) }
+            previousText = textSoFar
+        }
+
+        #expect(deltas == expected)
+        #expect(
+            previousText.unicodeScalars.contains { $0.value > 0x7F },
+            "the vocabulary must actually produce non-ASCII text"
+        )
+    }
+
     /// Degenerate feed: the whole utterance in a single step(), then finish().
     @Test func singleGiantChunkMatchesOffline() throws {
         let fixtureDir = try Self.makeRandomFixture()
