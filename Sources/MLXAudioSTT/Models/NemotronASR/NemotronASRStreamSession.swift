@@ -24,9 +24,8 @@ import MLXNN
 //     `NemotronASRStreamEncoderState` / `NemotronASRStreamRNNTState`, so resuming
 //     across `step` calls reproduces the single-shot walk.
 //
-// Cost note: v1 recomputes the full mel from the raw buffer each `step` (O(buffer)).
-// Mel is ~1% of encode, so this is negligible at utterance scale; an incremental
-// mel over a sliding raw window is a future optimization.
+// Cost: each `step` computes only the mel frames the encoder can still consume,
+// from the samples they cover, so a step costs O(chunk), not O(buffer).
 
 /// Per-stream greedy RNN-T state, carried across chunks / `step` calls.
 final class NemotronASRStreamRNNTState {
@@ -167,10 +166,30 @@ public final class NemotronASRStreamSession {
             return Delta(text: "", tokenIds: [])
         }
 
-        let audio = MLXArray(rawBuffer)
-        let mel = NemotronASRAudio.logMelSpectrogram(audio, config: model.preprocessConfig)  // (1, T, F)
-        let totalMel = mel.shape[1]
-        let limit = final ? totalMel : frozenMelFrames(totalMel: totalMel)
+        let config = model.preprocessConfig
+        let mel: MLXArray
+        let melOffset: Int
+        let limit: Int
+        if (config.padTo > 0 && rawBuffer.count < config.padTo) || rawBuffer.count < config.nFft {
+            mel = NemotronASRAudio.logMelSpectrogram(MLXArray(rawBuffer), config: config)  // (1, T, F)
+            melOffset = 0
+            limit = final ? mel.shape[1] : frozenMelFrames(totalMel: mel.shape[1])
+        } else {
+            // Only the frames the encoder can still consume: [consumed, limit). The
+            // bounds are widened to the RFFT row pairs of the full computation (see
+            // `logMelFrames`), so every frame matches the whole-buffer mel bit for bit.
+            let half = config.nFft / 2
+            let totalMel = 1 + (rawBuffer.count + 2 * half - config.nFft) / config.hopLength
+            limit = final ? totalMel : frozenMelFrames(totalMel: totalMel)
+            let first = encState.consumed & ~1
+            let end = limit % 2 == 0 ? limit : min(limit + 1, totalMel)
+            guard encState.consumed < limit else {
+                if final { done = true; Memory.clearCache() }
+                return Delta(text: "", tokenIds: [])
+            }
+            mel = NemotronASRAudio.logMelFrames(rawBuffer, first: first, end: end, config: config)
+            melOffset = first
+        }
 
         let firstNew = rnntState.results.count
         model.streamEncodeChunks(
@@ -179,7 +198,8 @@ public final class NemotronASRStreamSession {
             limit: limit,
             chunkFrames: chunkFrames,
             flushTail: final,
-            state: encState
+            state: encState,
+            melOffset: melOffset
         ) { prompted in
             model.streamRNNTDecode(prompted, state: rnntState, frameSeconds: frameSeconds)
         }

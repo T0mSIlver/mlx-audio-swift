@@ -3409,6 +3409,24 @@ struct NemotronASRTests {
         #expect(model.parameters().flattened().contains { key, _ in key.hasPrefix("prompt_kernel.") } == false)
     }
 
+    @Test func incrementalMelFramesMatchFullMelBitForBit() {
+        guard mlxRuntimeEnabled else {
+            print("Skipping Nemotron ASR MLX runtime test. Set MLXAUDIO_ENABLE_MLX_RUNTIME_TESTS=1 to enable.")
+            return
+        }
+        let config = NemotronASRPreprocessConfig()
+        var rng = SystemRandomNumberGenerator()
+        let samples = (0..<(16_000 + 37)).map { _ in Float.random(in: -1...1, using: &rng) }
+        let full = NemotronASRAudio.logMelSpectrogram(MLXArray(samples), config: config)
+        let total = full.shape[1]
+        for (first, end) in [(0, 2), (0, total), (10, 40), (58, total), (total - 1, total), (96, 98)] {
+            let part = NemotronASRAudio.logMelFrames(samples, first: first, end: end, config: config)
+            let expected = full[0..., first..<end, 0...]
+            #expect(part.shape == expected.shape)
+            #expect(MLX.all(part .== expected).item(Bool.self), "frames \(first)..<\(end)")
+        }
+    }
+
     @Test func legacyQuantizedPointwiseConvolutionSanitizesAsConv1dWeight() {
         guard mlxRuntimeEnabled else {
             print("Skipping Nemotron ASR MLX runtime test. Set MLXAUDIO_ENABLE_MLX_RUNTIME_TESTS=1 to enable.")
