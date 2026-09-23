@@ -25,7 +25,9 @@ import MLXAudioCore
 /// Persistent incremental-encoder state carried across `step` calls.
 ///
 /// The caches are class instances, so a copy of this state shares them with the
-/// original: feeding one copy advances the caches of both.
+/// original. Feeding one copy advances the shared caches while the other copy's
+/// `blockBase` and `consumed` stay behind, leaving that copy out of sync with its
+/// caches. Keep a single owner.
 struct VoxtralRealtimeStreamEncoderState {
     let caches: [VoxtralRealtimeEncoderStreamKVCache]
     var blockBase = 0   // absolute conv-frame index where the current sw-block began
