@@ -166,6 +166,46 @@ struct VoxtralRealtimeStreamingFrontEndTests {
         #expect(session.tokens.count == offline.generationTokens)
     }
 
+    /// The argmax evaluated with the decoder step is the token `sample` picks.
+    @Test func evalPredictionReadsTheSampledToken() throws {
+        let fixtureDir = try Self.makeRandomFixture()
+        defer { try? FileManager.default.removeItem(at: fixtureDir) }
+        let model = try VoxtralRealtimeModel.fromDirectory(fixtureDir)
+
+        for shape in [[1_000], [1, 1_000]] {
+            let logits = MLXRandom.normal(shape).asType(.float16)
+            let prediction = model.evalPrediction(logits, temperature: 0)
+            #expect(
+                model.readToken(prediction, temperature: 0)
+                    == model.sample(logits: logits, temperature: 0)
+            )
+        }
+    }
+
+    /// `generateStream`'s token deltas add up to its final transcript.
+    @Test func generateStreamDeltasAddUpToTheTranscript() async throws {
+        let fixtureDir = try Self.makeRandomFixture(eosTokenId: 99)
+        defer { try? FileManager.default.removeItem(at: fixtureDir) }
+        let model = try VoxtralRealtimeModel.fromDirectory(fixtureDir)
+        let params = STTGenerateParameters(maxTokens: 64, temperature: 0.0)
+
+        var joined = ""
+        var result: STTOutput?
+        for try await event in model.generateStream(
+            audio: MLXArray(Self.sweep(40_000)), generationParameters: params
+        ) {
+            switch event {
+            case .token(let delta): joined += delta
+            case .result(let output): result = output
+            case .info: break
+            }
+        }
+        let offline = model.generate(audio: MLXArray(Self.sweep(40_000)), generationParameters: params)
+        #expect(result?.text == offline.text)
+        #expect(!offline.text.isEmpty)
+        #expect(joined.trimmingCharacters(in: .whitespacesAndNewlines) == offline.text)
+    }
+
     /// Degenerate feed: the whole utterance in a single step(), then finish().
     @Test func singleGiantChunkMatchesOffline() throws {
         let fixtureDir = try Self.makeRandomFixture()
