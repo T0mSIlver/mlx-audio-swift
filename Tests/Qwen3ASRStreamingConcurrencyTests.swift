@@ -21,19 +21,25 @@ private func makeTinyQwen3ASRModel() throws -> Qwen3ASRModel {
     let model = Qwen3ASRModel(config)
     eval(model.parameters())
 
-    let specialTokens: [String: Int] = [
-        "<unk>": 0,
-        "<|im_start|>": 151_644,
-        "<|im_end|>": 151_645,
-        "<|audio_start|>": config.audioStartTokenId,
-        "<|audio_end|>": config.audioEndTokenId,
-        "<|audio_pad|>": config.audioTokenId,
-    ]
+    // Only the prompt's special tokens; other text encodes to <unk>.
     model.tokenizer = try AutoTokenizer.from(
         tokenizerConfig: ["tokenizer_class": "GPT2Tokenizer", "unk_token": "<unk>", "fuse_unk": true],
         tokenizerData: [
-            "model": ["type": "BPE", "unk_token": "<unk>", "merges": [], "vocab": specialTokens],
-            "added_tokens": specialTokens.map { ["id": $0.value, "content": $0.key, "special": true] },
+            "model": [
+                "type": "BPE", "unk_token": "<unk>", "merges": [],
+                "vocab": [
+                    "<unk>": 0, "<|im_start|>": 151_644, "<|im_end|>": 151_645,
+                    "<|audio_start|>": 151_669, "<|audio_end|>": 151_670, "<|audio_pad|>": 151_676,
+                ],
+            ],
+            "added_tokens": [
+                ["id": 0, "content": "<unk>", "special": true],
+                ["id": 151_644, "content": "<|im_start|>", "special": true],
+                ["id": 151_645, "content": "<|im_end|>", "special": true],
+                ["id": 151_669, "content": "<|audio_start|>", "special": true],
+                ["id": 151_670, "content": "<|audio_end|>", "special": true],
+                ["id": 151_676, "content": "<|audio_pad|>", "special": true],
+            ],
         ]
     )
     return model
