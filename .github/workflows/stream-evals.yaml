@@ -1,0 +1,100 @@
+# CI only, not for merge: streams one spoken passage through each Nemotron perf branch
+# and checks the transcript is byte-identical to main's. Voxtral 4B does not fit: the
+# 7 GB runner lost contact mid-run (run 36176596980).
+name: Stream evals
+
+on:
+  pull_request:
+    branches:
+      - main
+
+env:
+  NEMOTRON: mlx-community/nemotron-3.5-asr-streaming-0.6b-8bit
+
+jobs:
+  audio:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Speak the passage
+        run: |
+          say -f .github/evals/passage.txt -o passage.wav --data-format=LEI16@16000
+          afinfo passage.wav | grep -i duration
+      - uses: actions/upload-artifact@v4
+        with:
+          name: audio
+          path: passage.wav
+
+  transcribe:
+    needs: audio
+    runs-on: macos-latest
+    timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { name: main, ref: 01dec7c9bdce3088a6b6b7ab9f2e403458195efb, models: nemotron }
+          - { name: combined, ref: bench/stream-perf-combined, models: nemotron }
+          - { name: nemotron-stream-model, ref: perf/nemotron-stream-model, models: nemotron }
+          - { name: nemotron-stream-frontend, ref: perf/nemotron-stream-frontend, models: nemotron }
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ matrix.ref }}
+      - uses: actions/download-artifact@v4
+        with:
+          name: audio
+      - name: Select Xcode version
+        uses: maxim-lobanov/setup-xcode@v1
+        with:
+          xcode-version: 'latest'
+      - name: Install Metal toolchain
+        run: xcodebuild -downloadComponent MetalToolchain
+      - name: Build the STT CLI
+        run: xcodebuild build -scheme mlx-audio-swift-stt -configuration Release -destination 'platform=macOS' -derivedDataPath dd MACOSX_DEPLOYMENT_TARGET=14.0 CODE_SIGNING_ALLOWED=NO -quiet
+      - name: Stream the passage
+        run: |
+          mkdir -p out
+          git rev-parse HEAD > out/sha.txt
+          for m in ${{ matrix.models }}; do
+            repo=$NEMOTRON
+            /usr/bin/time -l dd/Build/Products/Release/mlx-audio-swift-stt \
+              --model "$repo" --audio passage.wav --output-path "out/$m" --format txt --stream \
+              > "out/$m.log" 2> "out/$m.time"
+            echo "== $m"; cat "out/$m.txt"; echo
+            grep -E "real|peak memory footprint" "out/$m.time" || tail -5 "out/$m.time"
+          done
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: out-${{ matrix.name }}
+          path: out
+
+  compare:
+    needs: transcribe
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: out-*
+      - name: Compare with main
+        run: |
+          fail=0
+          {
+            echo "| Branch | SHA | Model | Transcript vs main |"
+            echo "|---|---|---|---|"
+            for d in out-*; do
+              b=${d#out-}; [ "$b" = main ] && continue
+              for l in "$d"/*.log; do
+                m=$(basename "$l" .log); f="$d/$m.txt"
+                if [ ! -s "out-main/$m.txt" ]; then r="no main transcript"; fail=1
+                elif [ ! -s "$f" ]; then r="no transcript (run failed)"; fail=1
+                elif cmp -s "$f" "out-main/$m.txt"; then r="identical"
+                else r="DIFFERS"; fail=1; diff <(tr ' ' '\n' < "out-main/$m.txt") <(tr ' ' '\n' < "$f") | head -20 >&2; fi
+                echo "| $b | $(cut -c1-7 "$d/sha.txt") | $m | $r |"
+              done
+            done
+          } | tee -a "$GITHUB_STEP_SUMMARY"
+          [ -s out-main/nemotron.txt ] || { echo "main transcript missing or empty"; fail=1; }
+          exit $fail
