@@ -1,0 +1,103 @@
+# CI only, not for merge: streams one spoken passage through each perf branch and
+# checks the transcript is byte-identical to main's.
+name: Stream evals
+
+on:
+  pull_request:
+    branches:
+      - main
+
+env:
+  VOXTRAL: mlx-community/Voxtral-Mini-4B-Realtime-2602-4bit
+  NEMOTRON: mlx-community/nemotron-3.5-asr-streaming-0.6b-8bit
+
+jobs:
+  audio:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Speak the passage
+        run: |
+          say -f .github/evals/passage.txt -o passage.wav --data-format=LEI16@16000
+          afinfo passage.wav | grep -i duration
+      - uses: actions/upload-artifact@v4
+        with:
+          name: audio
+          path: passage.wav
+
+  transcribe:
+    needs: audio
+    runs-on: macos-latest
+    timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { name: main, ref: 01dec7c9bdce3088a6b6b7ab9f2e403458195efb, models: "voxtral nemotron" }
+          - { name: combined, ref: bench/stream-perf-combined, models: "voxtral nemotron" }
+          - { name: voxtral-stream-decoder, ref: perf/voxtral-stream-decoder, models: voxtral }
+          - { name: voxtral-stream-encoder, ref: perf/voxtral-stream-encoder, models: voxtral }
+          - { name: nemotron-stream-model, ref: perf/nemotron-stream-model, models: nemotron }
+          - { name: nemotron-stream-frontend, ref: perf/nemotron-stream-frontend, models: nemotron }
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ matrix.ref }}
+      - uses: actions/download-artifact@v4
+        with:
+          name: audio
+      - name: Select Xcode version
+        uses: maxim-lobanov/setup-xcode@v1
+        with:
+          xcode-version: 'latest'
+      - name: Install Metal toolchain
+        run: xcodebuild -downloadComponent MetalToolchain
+      - name: Build the STT CLI
+        run: xcodebuild build -scheme mlx-audio-swift-stt -configuration Release -destination 'platform=macOS' -derivedDataPath dd MACOSX_DEPLOYMENT_TARGET=14.0 CODE_SIGNING_ALLOWED=NO -quiet
+      - name: Stream the passage
+        run: |
+          mkdir -p out
+          git rev-parse HEAD > out/sha.txt
+          for m in ${{ matrix.models }}; do
+            repo=$([ "$m" = voxtral ] && echo "$VOXTRAL" || echo "$NEMOTRON")
+            /usr/bin/time -l dd/Build/Products/Release/mlx-audio-swift-stt \
+              --model "$repo" --audio passage.wav --output-path "out/$m" --format txt --stream \
+              > "out/$m.log" 2> "out/$m.time"
+            echo "== $m"; cat "out/$m.txt"; echo
+            grep -E "real|peak memory footprint" "out/$m.time" || tail -5 "out/$m.time"
+          done
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: out-${{ matrix.name }}
+          path: out
+
+  compare:
+    needs: transcribe
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: out-*
+      - name: Compare with main
+        run: |
+          fail=0
+          {
+            echo "| Branch | SHA | Model | Transcript vs main |"
+            echo "|---|---|---|---|"
+            for d in out-*; do
+              b=${d#out-}; [ "$b" = main ] && continue
+              for f in "$d"/*.txt; do
+                m=$(basename "$f" .txt); [ "$m" = sha ] && continue
+                if [ ! -s "out-main/$m.txt" ]; then r="no main transcript"; fail=1
+                elif cmp -s "$f" "out-main/$m.txt"; then r="identical"
+                else r="DIFFERS"; fail=1; diff <(tr ' ' '\n' < "out-main/$m.txt") <(tr ' ' '\n' < "$f") | head -20 >&2; fi
+                echo "| $b | $(cut -c1-7 "$d/sha.txt") | $m | $r |"
+              done
+            done
+          } | tee -a "$GITHUB_STEP_SUMMARY"
+          for m in voxtral nemotron; do
+            [ -s "out-main/$m.txt" ] || { echo "main $m transcript missing or empty"; fail=1; }
+          done
+          exit $fail
