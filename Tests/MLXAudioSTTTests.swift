@@ -3526,7 +3526,6 @@ struct NemotronASRTests {
         let booster = try #require(makeBooster(["Claude Code"]))
         // "▁clo" leads "▁cl" by 1.0; the first-token bonus (1.5) flips it.
         #expect(booster.choose(logits: logits([5: 0, 3: -1]), greedy: 5) == 3)
-        #expect(booster.boostedTokenCount == 1)
     }
 
     @Test func termBoostContinuesAMatchUnderWay() throws {
@@ -3543,7 +3542,6 @@ struct NemotronASRTests {
     @Test func termBoostLeavesPiecesOutsideTheMarginAlone() throws {
         let booster = try #require(makeBooster(["Claude Code"], config: .init(margin: 1)))
         #expect(booster.choose(logits: logits([5: 0, 3: -1.5]), greedy: 5) == 5)
-        #expect(booster.boostedTokenCount == 0)
     }
 
     @Test func termBoostNeverOverridesASpecialToken() throws {

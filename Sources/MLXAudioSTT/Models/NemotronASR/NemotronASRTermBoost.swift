@@ -48,16 +48,12 @@ final class NemotronASRTermBooster {
     private let prefixes: Set<String>
     /// Matches under way: term prefixes the emitted text currently ends with.
     private var active: [String] = []
-    /// Decisions the boost changed, for the caller's log.
-    private(set) var boostedTokenCount = 0
-
     /// Returns nil when no term survives normalization.
     init?(
         terms: [String],
         vocabulary: [String],
         blankToken: Int,
-        config: NemotronASRTermBoostConfig,
-        boostedTokenCount: Int = 0
+        config: NemotronASRTermBoostConfig
     ) {
         var prefixes = Set<String>()
         for term in terms {
@@ -73,7 +69,6 @@ final class NemotronASRTermBooster {
         guard !prefixes.isEmpty else { return nil }
         self.prefixes = prefixes
         self.config = config
-        self.boostedTokenCount = boostedTokenCount
         self.pieceText = vocabulary.indices.map { id in
             guard id != blankToken, !NemotronASRTokenizer.isSpecialToken(id, vocabulary: vocabulary) else {
                 return nil
@@ -95,7 +90,6 @@ final class NemotronASRTermBooster {
                 bestScore = score
             }
         }
-        if best != greedy { boostedTokenCount += 1 }
         return best
     }
 
