@@ -23,13 +23,20 @@ import MLXAudioCore
 //   * `finish()` reproduces the offline tail zero-pad ⇒ final transcript == generate().
 
 /// Persistent incremental-encoder state carried across `step` calls.
+///
+/// The caches are class instances, so a copy of this state shares them with the
+/// original. Feeding one copy advances the shared caches while the other copy's
+/// `blockBase` and `consumed` stay behind, leaving that copy out of sync with its
+/// caches. Keep a single owner.
 struct VoxtralRealtimeStreamEncoderState {
-    var caches: [VoxtralRealtimeEncoderKVCache?]
+    let caches: [VoxtralRealtimeEncoderStreamKVCache]
     var blockBase = 0   // absolute conv-frame index where the current sw-block began
     var consumed = 0    // conv frames already fed to the transformer
 
-    init(layers: Int) {
-        caches = Array(repeating: nil, count: layers)
+    init(layers: Int, slidingWindow: Int) {
+        caches = (0..<layers).map { _ in
+            VoxtralRealtimeEncoderStreamKVCache(capacity: slidingWindow)
+        }
     }
 }
 
@@ -54,10 +61,11 @@ extension VoxtralRealtimeAudioEncoder {
             // Block-relative positions: RoPE is relative, so this matches the absolute
             // positions offline uses within each independent sw-block.
             let relStart = state.consumed - state.blockBase
-            pieces.append(encodeIncremental(block, startPos: relStart, caches: &state.caches))
+            pieces.append(encodeIncremental(block, startPos: relStart, caches: state.caches))
             state.consumed = end
             if state.consumed == blockEnd {
-                state.caches = Array(repeating: nil, count: transformerLayers.count)
+                // The storage is kept; the next block overwrites it from row zero.
+                state.caches.forEach { $0.reset() }
                 state.blockBase = blockEnd
             }
         }
@@ -121,7 +129,8 @@ public final class VoxtralRealtimeStreamSession {
         self.maxTokens = maxTokens
         self.transcriptionDelayMs = transcriptionDelayMs
         self.encState = VoxtralRealtimeStreamEncoderState(
-            layers: model.encoder.transformerLayers.count
+            layers: model.encoder.transformerLayers.count,
+            slidingWindow: model.config.encoderArgs.slidingWindow
         )
     }
 
@@ -289,7 +298,10 @@ public final class VoxtralRealtimeStreamSession {
         if let carry = convState.conv2Carry { arrays.append(carry) }
         if let adapterBuf { arrays.append(adapterBuf) }
         for cache in encState.caches {
-            if let cache { arrays.append(cache.keys); arrays.append(cache.values) }
+            if let keys = cache.keys, let values = cache.values {
+                arrays.append(keys)
+                arrays.append(values)
+            }
         }
         if !arrays.isEmpty { MLX.eval(arrays) }
     }
