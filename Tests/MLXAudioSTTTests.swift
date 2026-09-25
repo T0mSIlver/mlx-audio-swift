@@ -3421,10 +3421,15 @@ struct NemotronASRTests {
         let hop = config.hopLength
         MLXRandom.seed(7)
         let audio = MLXRandom.uniform(low: Float(-1), high: Float(1), [90 * 16_000 + 37]).asArray(Float.self)
+        // With an odd nFft and a length that is a multiple of hop, 1 + length / hop overcounts.
+        let oddConfig = NemotronASRPreprocessConfig(nFft: 511)
+        let oddMel = NemotronASRAudio.logMelSpectrogram(MLXArray(Array(audio[..<(300 * hop)])), config: oddConfig)
+        #expect(NemotronASRAudio.frameCount(sampleCount: 300 * hop, config: oddConfig) == oddMel.shape[1])
         for length in [16_037, 256 * hop, 257 * hop + 5, 30 * 16_000 + 37, audio.count] {
             let samples = Array(audio[..<length])
             let full = NemotronASRAudio.logMelSpectrogram(MLXArray(samples), config: config)
             let total = full.shape[1]
+            #expect(NemotronASRAudio.frameCount(sampleCount: length, config: config) == total)
             var ranges = [(0, 2), (0, total), (total - 1, total)]
             for size in [2, 30, 114, 258] where size <= total {
                 ranges.append((((total - size) / 2) & ~1, ((total - size) / 2 & ~1) + size))

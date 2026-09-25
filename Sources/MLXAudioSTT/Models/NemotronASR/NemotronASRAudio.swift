@@ -89,6 +89,11 @@ enum NemotronASRAudio {
         config.nFft / 2 + 2
     }
 
+    /// Frame count of `stft` over `sampleCount` samples with its centering pad.
+    static func frameCount(sampleCount: Int, config: NemotronASRPreprocessConfig) -> Int {
+        1 + (sampleCount + 2 * (config.nFft / 2) - config.nFft) / config.hopLength
+    }
+
     /// Mel frames `[first, end)` as the stream session computes them from the stream
     /// so far (`samples`, starting at stream sample `offset`), with the values
     /// `logMelSpectrogram(stream)` gives them. Returns the mel and the stream frame
@@ -102,7 +107,7 @@ enum NemotronASRAudio {
         config: NemotronASRPreprocessConfig,
         basis: MelBasis
     ) -> (mel: MLXArray, melOffset: Int) {
-        let totalMel = 1 + (offset + samples.count) / config.hopLength
+        let totalMel = frameCount(sampleCount: offset + samples.count, config: config)
         if totalMel < gemmMinRows(config: config) {
             precondition(offset == 0, "streamMelFrames: the whole-buffer mel needs the whole stream")
             return (logMelSpectrogram(MLXArray(samples), config: config), 0)

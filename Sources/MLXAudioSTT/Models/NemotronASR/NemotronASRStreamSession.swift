@@ -184,8 +184,7 @@ public final class NemotronASRStreamSession {
             // Only the frames the encoder can still consume: [consumed, limit). The
             // bounds are widened to the RFFT row pairs of the full computation (see
             // `logMelFrames`), so every frame matches the whole-buffer mel bit for bit.
-            let half = config.nFft / 2
-            let totalMel = 1 + (sampleCount + 2 * half - config.nFft) / config.hopLength
+            let totalMel = NemotronASRAudio.frameCount(sampleCount: sampleCount, config: config)
             limit = final ? totalMel : frozenMelFrames(totalMel: totalMel)
             let first = encState.consumed & ~1
             let end = limit % 2 == 0 ? limit : min(limit + 1, totalMel)
@@ -217,11 +216,16 @@ public final class NemotronASRStreamSession {
             model.streamRNNTDecode(prompted, state: rnntState, frameSeconds: frameSeconds)
         }
         if !final && sampleCount >= max(config.nFft, config.padTo)
-            && 1 + sampleCount / config.hopLength >= NemotronASRAudio.gemmMinRows(config: config) {
+            && NemotronASRAudio.frameCount(sampleCount: sampleCount, config: config)
+                >= NemotronASRAudio.gemmMinRows(config: config) {
             // Once `streamMelFrames` stops needing the whole stream, keep only what the
             // next step's first frame needs: from `consumed` rounded down to even, minus
-            // the STFT half-window and one pre-emphasis sample.
-            let keepFrom = max(0, (encState.consumed & ~1) * config.hopLength - config.nFft / 2 - 1)
+            // the STFT half-window and one pre-emphasis sample. With hop > nFft that
+            // point can lie past the last sample, so clamp it to the buffer.
+            let keepFrom = min(
+                max(0, (encState.consumed & ~1) * config.hopLength - config.nFft / 2 - 1),
+                sampleCount
+            )
             if keepFrom > rawOffset {
                 rawBuffer.removeFirst(keepFrom - rawOffset)
                 rawOffset = keepFrom
