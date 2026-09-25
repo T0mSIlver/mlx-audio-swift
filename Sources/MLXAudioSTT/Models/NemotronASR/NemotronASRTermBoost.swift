@@ -93,12 +93,10 @@ final class NemotronASRTermBooster {
         return best
     }
 
-    /// Advance the matches with an emitted token.
+    /// Advance the matches with an emitted token. Tokens that add no text, such
+    /// as a language tag, leave them as they are.
     func accept(_ token: Int) {
-        guard token < pieceText.count, let piece = pieceText[token] else {
-            active = []
-            return
-        }
+        guard token < pieceText.count, let piece = pieceText[token] else { return }
         var next: [String] = []
         for match in active {
             let extended = match + piece
@@ -115,9 +113,10 @@ final class NemotronASRTermBooster {
         var starts = piece.hasPrefix(" ") && prefixes.contains(piece)
         for match in active where prefixes.contains(match + piece) {
             // A bare "▁" emitted before the term's first letters starts it too.
-            if match.contains(where: { $0 != " " }) { return config.continuationBoost }
+            if match.contains(where: { $0 != " " }) { return max(config.continuationBoost, 0) }
             starts = true
         }
-        return starts ? config.firstTokenBoost : 0
+        // A negative bonus would let a piece outside every term win.
+        return starts ? max(config.firstTokenBoost, 0) : 0
     }
 }

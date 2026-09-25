@@ -3556,6 +3556,19 @@ struct NemotronASRTests {
         #expect(booster.choose(logits: logits([6: 0, 4: -2.5]), greedy: 6) == 6)
     }
 
+    @Test func termBoostKeepsAMatchAcrossATokenWithNoText() throws {
+        let booster = try #require(makeBooster(["Claude Code"]))
+        booster.accept(3)  // "▁cl"
+        booster.accept(1)  // "<en-US>" is not in the transcript
+        #expect(booster.choose(logits: logits([6: 0, 4: -2.5]), greedy: 6) == 4)
+    }
+
+    @Test func termBoostIgnoresNegativeBonuses() throws {
+        let booster = try #require(makeBooster(["Claude Code"], config: .init(firstTokenBoost: -1)))
+        // "▁cl" starts the term; "▁the" does not and must not win from it.
+        #expect(booster.choose(logits: logits([3: 0, 9: -0.1]), greedy: 3) == 3)
+    }
+
     @Test func termBoostCountsABareSpaceAsTheStartOfAWord() throws {
         let booster = try #require(makeBooster(["aude"]))
         booster.accept(2)  // "▁"
