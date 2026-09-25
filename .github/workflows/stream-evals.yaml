@@ -88,9 +88,10 @@ jobs:
             echo "|---|---|---|---|"
             for d in out-*; do
               b=${d#out-}; [ "$b" = main ] && continue
-              for f in "$d"/*.txt; do
-                m=$(basename "$f" .txt); [ "$m" = sha ] && continue
+              for l in "$d"/*.log; do
+                m=$(basename "$l" .log); f="$d/$m.txt"
                 if [ ! -s "out-main/$m.txt" ]; then r="no main transcript"; fail=1
+                elif [ ! -s "$f" ]; then r="no transcript (run failed)"; fail=1
                 elif cmp -s "$f" "out-main/$m.txt"; then r="identical"
                 else r="DIFFERS"; fail=1; diff <(tr ' ' '\n' < "out-main/$m.txt") <(tr ' ' '\n' < "$f") | head -20 >&2; fi
                 echo "| $b | $(cut -c1-7 "$d/sha.txt") | $m | $r |"
