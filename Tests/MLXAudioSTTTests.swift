@@ -3518,19 +3518,19 @@ struct NemotronASRTests {
         return values
     }
 
-    private func booster(_ terms: [String], config: NemotronASRTermBoostConfig = .init()) -> NemotronASRTermBooster? {
+    private func makeBooster(_ terms: [String], config: NemotronASRTermBoostConfig = .init()) -> NemotronASRTermBooster? {
         NemotronASRTermBooster(terms: terms, vocabulary: boostVocab, blankToken: boostBlank, config: config)
     }
 
     @Test func termBoostPicksATermStartWithinTheMargin() throws {
-        let booster = try #require(booster(["Claude Code"]))
+        let booster = try #require(makeBooster(["Claude Code"]))
         // "▁clo" leads "▁cl" by 1.0; the first-token bonus (1.5) flips it.
         #expect(booster.choose(logits: logits([5: 0, 3: -1]), greedy: 5) == 3)
         #expect(booster.boostedTokenCount == 1)
     }
 
     @Test func termBoostContinuesAMatchUnderWay() throws {
-        let booster = try #require(booster(["Claude Code"]))
+        let booster = try #require(makeBooster(["Claude Code"]))
         booster.accept(3)  // "▁cl"
         // "thes" leads "aude" by 2.5: more than the first-token bonus, less than
         // the continuation bonus.
@@ -3541,25 +3541,25 @@ struct NemotronASRTests {
     }
 
     @Test func termBoostLeavesPiecesOutsideTheMarginAlone() throws {
-        let booster = try #require(booster(["Claude Code"], config: .init(margin: 1)))
+        let booster = try #require(makeBooster(["Claude Code"], config: .init(margin: 1)))
         #expect(booster.choose(logits: logits([5: 0, 3: -1.5]), greedy: 5) == 5)
         #expect(booster.boostedTokenCount == 0)
     }
 
     @Test func termBoostNeverOverridesASpecialToken() throws {
-        let booster = try #require(booster(["Claude Code"]))
+        let booster = try #require(makeBooster(["Claude Code"]))
         #expect(booster.choose(logits: logits([1: 0, 3: -0.1]), greedy: 1) == 1)
     }
 
     @Test func termBoostDropsAMatchThatStopsExtending() throws {
-        let booster = try #require(booster(["Claude Code"]))
+        let booster = try #require(makeBooster(["Claude Code"]))
         booster.accept(3)  // "▁cl"
         booster.accept(6)  // "thes": " clthes" is no term prefix
         #expect(booster.choose(logits: logits([6: 0, 4: -2.5]), greedy: 6) == 6)
     }
 
     @Test func termBoostCountsABareSpaceAsTheStartOfAWord() throws {
-        let booster = try #require(booster(["aude"]))
+        let booster = try #require(makeBooster(["aude"]))
         booster.accept(2)  // "▁"
         #expect(booster.choose(logits: logits([6: 0, 4: -1]), greedy: 6) == 4)
         booster.accept(5)  // "▁clo" is no start of "aude"
@@ -3567,8 +3567,8 @@ struct NemotronASRTests {
     }
 
     @Test func termBoostWithNoUsableTermIsOff() {
-        #expect(booster([]) == nil)
-        #expect(booster(["  ", ""]) == nil)
+        #expect(makeBooster([]) == nil)
+        #expect(makeBooster(["  ", ""]) == nil)
     }
 
     /// Synthetic 16 kHz waveform long enough to span several native chunks.
