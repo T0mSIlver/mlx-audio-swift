@@ -3505,6 +3505,83 @@ struct NemotronASRTests {
         #expect(NemotronASRTokenizer.detectedLanguage(tokens: [1, 2, 3], vocabulary: vocab) == "en-US")
     }
 
+    // MARK: Term boost (Metal-free: the booster only sees plain logits)
+
+    private let boostVocab = [
+        "<unk>", "<en-US>", "▁", "▁cl", "aude", "▁clo", "thes", "▁code", "▁Cl", "▁the", "▁Code",
+    ]
+    private var boostBlank: Int { boostVocab.count }
+
+    private func logits(_ pairs: [Int: Float]) -> [Float] {
+        var values = [Float](repeating: -20, count: boostVocab.count + 1)
+        for (id, value) in pairs { values[id] = value }
+        return values
+    }
+
+    private func makeBooster(_ terms: [String], config: NemotronASRTermBoostConfig = .init()) -> NemotronASRTermBooster? {
+        NemotronASRTermBooster(terms: terms, vocabulary: boostVocab, blankToken: boostBlank, config: config)
+    }
+
+    @Test func termBoostPicksATermStartWithinTheMargin() throws {
+        let booster = try #require(makeBooster(["Claude Code"]))
+        // "▁clo" leads "▁cl" by 1.0; the first-token bonus (1.5) flips it.
+        #expect(booster.choose(logits: logits([5: 0, 3: -1]), greedy: 5) == 3)
+    }
+
+    @Test func termBoostContinuesAMatchUnderWay() throws {
+        let booster = try #require(makeBooster(["Claude Code"]))
+        booster.accept(3)  // "▁cl"
+        // "thes" leads "aude" by 2.5: more than the first-token bonus, less than
+        // the continuation bonus.
+        #expect(booster.choose(logits: logits([6: 0, 4: -2.5]), greedy: 6) == 4)
+        booster.accept(4)  // "aude"
+        // Casing is ignored: "▁Code" continues "claude".
+        #expect(booster.choose(logits: logits([9: 0, 10: -2.5]), greedy: 9) == 10)
+    }
+
+    @Test func termBoostLeavesPiecesOutsideTheMarginAlone() throws {
+        let booster = try #require(makeBooster(["Claude Code"], config: .init(margin: 1)))
+        #expect(booster.choose(logits: logits([5: 0, 3: -1.5]), greedy: 5) == 5)
+    }
+
+    @Test func termBoostNeverOverridesASpecialToken() throws {
+        let booster = try #require(makeBooster(["Claude Code"]))
+        #expect(booster.choose(logits: logits([1: 0, 3: -0.1]), greedy: 1) == 1)
+    }
+
+    @Test func termBoostDropsAMatchThatStopsExtending() throws {
+        let booster = try #require(makeBooster(["Claude Code"]))
+        booster.accept(3)  // "▁cl"
+        booster.accept(6)  // "thes": " clthes" is no term prefix
+        #expect(booster.choose(logits: logits([6: 0, 4: -2.5]), greedy: 6) == 6)
+    }
+
+    @Test func termBoostKeepsAMatchAcrossATokenWithNoText() throws {
+        let booster = try #require(makeBooster(["Claude Code"]))
+        booster.accept(3)  // "▁cl"
+        booster.accept(1)  // "<en-US>" is not in the transcript
+        #expect(booster.choose(logits: logits([6: 0, 4: -2.5]), greedy: 6) == 4)
+    }
+
+    @Test func termBoostIgnoresNegativeBonuses() throws {
+        let booster = try #require(makeBooster(["Claude Code"], config: .init(firstTokenBoost: -1)))
+        // "▁cl" starts the term; "▁the" does not and must not win from it.
+        #expect(booster.choose(logits: logits([3: 0, 9: -0.1]), greedy: 3) == 3)
+    }
+
+    @Test func termBoostCountsABareSpaceAsTheStartOfAWord() throws {
+        let booster = try #require(makeBooster(["aude"]))
+        booster.accept(2)  // "▁"
+        #expect(booster.choose(logits: logits([6: 0, 4: -1]), greedy: 6) == 4)
+        booster.accept(5)  // "▁clo" is no start of "aude"
+        #expect(booster.choose(logits: logits([6: 0, 4: -1]), greedy: 6) == 6)
+    }
+
+    @Test func termBoostWithNoUsableTermIsOff() {
+        #expect(makeBooster([]) == nil)
+        #expect(makeBooster(["  ", ""]) == nil)
+    }
+
     /// Synthetic 16 kHz waveform long enough to span several native chunks.
     private func syntheticAudio(samples: Int) -> MLXArray {
         let values = (0..<samples).map { i in
