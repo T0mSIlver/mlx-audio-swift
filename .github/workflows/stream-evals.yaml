@@ -1,5 +1,6 @@
-# CI only, not for merge: streams one spoken passage through each perf branch and
-# checks the transcript is byte-identical to main's.
+# CI only, not for merge: streams one spoken passage through each Nemotron perf branch
+# and checks the transcript is byte-identical to main's. Voxtral 4B does not fit: the
+# 7 GB runner lost contact mid-run (run 36176596980).
 name: Stream evals
 
 on:
@@ -8,7 +9,6 @@ on:
       - main
 
 env:
-  VOXTRAL: mlx-community/Voxtral-Mini-4B-Realtime-2602-4bit
   NEMOTRON: mlx-community/nemotron-3.5-asr-streaming-0.6b-8bit
 
 jobs:
@@ -33,10 +33,8 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - { name: main, ref: 01dec7c9bdce3088a6b6b7ab9f2e403458195efb, models: "voxtral nemotron" }
-          - { name: combined, ref: bench/stream-perf-combined, models: "voxtral nemotron" }
-          - { name: voxtral-stream-decoder, ref: perf/voxtral-stream-decoder, models: voxtral }
-          - { name: voxtral-stream-encoder, ref: perf/voxtral-stream-encoder, models: voxtral }
+          - { name: main, ref: 01dec7c9bdce3088a6b6b7ab9f2e403458195efb, models: nemotron }
+          - { name: combined, ref: bench/stream-perf-combined, models: nemotron }
           - { name: nemotron-stream-model, ref: perf/nemotron-stream-model, models: nemotron }
           - { name: nemotron-stream-frontend, ref: perf/nemotron-stream-frontend, models: nemotron }
     steps:
@@ -59,7 +57,7 @@ jobs:
           mkdir -p out
           git rev-parse HEAD > out/sha.txt
           for m in ${{ matrix.models }}; do
-            repo=$([ "$m" = voxtral ] && echo "$VOXTRAL" || echo "$NEMOTRON")
+            repo=$NEMOTRON
             /usr/bin/time -l dd/Build/Products/Release/mlx-audio-swift-stt \
               --model "$repo" --audio passage.wav --output-path "out/$m" --format txt --stream \
               > "out/$m.log" 2> "out/$m.time"
@@ -98,7 +96,5 @@ jobs:
               done
             done
           } | tee -a "$GITHUB_STEP_SUMMARY"
-          for m in voxtral nemotron; do
-            [ -s "out-main/$m.txt" ] || { echo "main $m transcript missing or empty"; fail=1; }
-          done
+          [ -s out-main/nemotron.txt ] || { echo "main transcript missing or empty"; fail=1; }
           exit $fail
