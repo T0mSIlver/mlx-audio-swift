@@ -1,6 +1,6 @@
 import Foundation
+import MLXAudioCore
 import MLX
-import MLXLMCommon
 import MLXNN
 
 struct MiMoTransformerConfiguration: Sendable {
@@ -75,8 +75,9 @@ private final class MiMoAttention: Module {
             .reshaped(batch, sequence, config.kvHeads, -1)
             .transposed(0, 2, 1, 3)
 
-        queries = applyRotaryPosition(rope, to: queries, cache: cache)
-        keys = applyRotaryPosition(rope, to: keys, cache: cache)
+        let offset = cache?.ropeOffset
+        queries = applyRotaryPosition(rope, to: queries, offset: offset)
+        keys = applyRotaryPosition(rope, to: keys, offset: offset)
 
         let output = attentionWithCacheUpdate(
             queries: queries,
@@ -292,12 +293,30 @@ final class MiMoV2ASRCore: Module, BaseLanguageModel {
         config: MiMoV2ASRConfig
     ) throws -> MiMoV2ASRCore {
         let model = MiMoV2ASRCore(config: config)
-        try loadWeights(
-            modelDirectory: modelDirectory,
-            model: model,
-            quantization: config.quantization,
-            perLayerQuantization: config.perLayerQuantization
+
+        // What MLXLMCommon.loadWeights did before #287: merge the safetensors,
+        // quantize the layers that ship .scales, then load strictly.
+        var weights: [String: MLXArray] = [:]
+        let files = try FileManager.default.contentsOfDirectory(
+            at: modelDirectory, includingPropertiesForKeys: nil
         )
+        for file in files where file.pathExtension == "safetensors" {
+            weights.merge(try MLX.loadArrays(url: file)) { _, new in new }
+        }
+        weights = model.sanitize(weights: weights)
+
+        if config.quantization != nil || config.perLayerQuantization != nil {
+            quantize(model: model) { path, _ in
+                guard weights["\(path).scales"] != nil else { return nil }
+                if let perLayer = config.perLayerQuantization {
+                    return perLayer.quantization(layer: path)?.asTuple
+                }
+                return config.quantization?.asTuple
+            }
+        }
+
+        try model.update(parameters: ModuleParameters.unflattened(weights), verify: .all)
+        eval(model.parameters())
         return model
     }
 

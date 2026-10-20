@@ -1,5 +1,5 @@
 import Foundation
-import MLXLMCommon
+import MLXAudioCore
 
 private func decodeStringEncodedInts(
     from container: KeyedDecodingContainer<MiMoV2ASRConfig.CodingKeys>,

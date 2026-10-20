@@ -1,5 +1,5 @@
 import Foundation
-import MLXLMCommon
+import MLXAudioCore
 
 public struct MiMoAudioTokenizerConfig: Decodable, Sendable {
     public let maxAudioSeconds: Int

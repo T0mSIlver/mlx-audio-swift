@@ -469,6 +469,10 @@ enum App {
         if lower.contains("forcedalign") || lower.contains("forced-align") {
             return .forcedAligner(try await Qwen3ForcedAlignerModel.fromPretrained(repo))
         }
+        if lower.contains("mimo") {
+            // MiMo's config may not name MiMo in model_type (it defaults to qwen2), so route by name.
+            return .stt(try await MiMoV2ASRModel.fromPretrained(repo))
+        }
         return .stt(try await STT.loadModel(modelRepo: repo))
     }
 

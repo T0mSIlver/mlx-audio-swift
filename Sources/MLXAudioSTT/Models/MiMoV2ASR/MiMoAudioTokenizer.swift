@@ -165,11 +165,11 @@ final class MiMoAudioTokenizerEncoder: Module {
     let config: MiMoAudioTokenizerConfig
     let activeQuantizers: Int
 
-    @ModuleInfo(key: "conv1") var conv1: MLXAudioCodecs.Conv1d
-    @ModuleInfo(key: "conv2") var conv2: MLXAudioCodecs.Conv1d
+    @ModuleInfo(key: "conv1") var conv1: MLXAudioCodecs.MimiConv1d
+    @ModuleInfo(key: "conv2") var conv2: MLXAudioCodecs.MimiConv1d
     @ModuleInfo(key: "layers") var layers: [MiMoAudioTokenizerEncoderLayer]
     @ModuleInfo(key: "layer_norm") var layerNorm: LayerNorm
-    @ModuleInfo(key: "down_sample_layer") var downSampleLayer: [MLXAudioCodecs.Conv1d]
+    @ModuleInfo(key: "down_sample_layer") var downSampleLayer: [MLXAudioCodecs.MimiConv1d]
     @ModuleInfo(key: "down_sample_norm") var downSampleNorm: LayerNorm
     @ModuleInfo(key: "quantizer") var quantizer: MiMoAudioTokenizerQuantizer
 
@@ -177,7 +177,7 @@ final class MiMoAudioTokenizerEncoder: Module {
         self.config = config
         self.activeQuantizers = activeQuantizers
 
-        _conv1.wrappedValue = MLXAudioCodecs.Conv1d(
+        _conv1.wrappedValue = MLXAudioCodecs.MimiConv1d(
             inChannels: config.nMels,
             outChannels: config.dModel,
             ksize: config.kernelSize,
@@ -185,7 +185,7 @@ final class MiMoAudioTokenizerEncoder: Module {
             padding: 1,
             bias: true
         )
-        _conv2.wrappedValue = MLXAudioCodecs.Conv1d(
+        _conv2.wrappedValue = MLXAudioCodecs.MimiConv1d(
             inChannels: config.dModel,
             outChannels: config.dModel,
             ksize: config.kernelSize,
@@ -198,7 +198,7 @@ final class MiMoAudioTokenizerEncoder: Module {
         }
         _layerNorm.wrappedValue = LayerNorm(dimensions: config.dModel, eps: 1e-5)
         _downSampleLayer.wrappedValue = [
-            MLXAudioCodecs.Conv1d(
+            MLXAudioCodecs.MimiConv1d(
                 inChannels: config.dModel,
                 outChannels: config.dModel,
                 ksize: config.avgPooler,
