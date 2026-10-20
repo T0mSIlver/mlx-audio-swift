@@ -4298,6 +4298,25 @@ struct GraniteSpeechModuleTests {
 
 }
 
+struct GraniteSpeechCTCRoutingTests {
+
+    /// A Granite CTC repo is not a granite_speech checkpoint (#260). With no model type given,
+    /// the loader must refuse it by type, before it downloads anything.
+    @Test func graniteCTCRepoIsNotRoutedToGraniteSpeech() async throws {
+        let error = await #expect(throws: STTModelError.self) {
+            _ = try await STT.loadModel(
+                modelRepo: "mlx-audio-swift-tests/granite-speech-5-ctc-fixture",
+                modelType: nil
+            )
+        }
+        guard case .unsupportedModelType(let modelType) = error else {
+            Issue.record("Expected unsupportedModelType, got \(String(describing: error))")
+            return
+        }
+        #expect(modelType == "granite_speech5_ctc")
+    }
+}
+
 // MARK: - Whisper Tests
 
 @Suite("Whisper Tests", .serialized)
