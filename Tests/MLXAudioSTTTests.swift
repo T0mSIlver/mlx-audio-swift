@@ -51,6 +51,7 @@ import Foundation
 import Testing
 import MLX
 import MLXNN
+import HuggingFace
 
 @testable import MLXAudioCore
 @testable import MLXAudioSTT
@@ -4448,5 +4449,38 @@ struct WhisperNetworkTests {
 
         #expect((output.segments?.count ?? 0) >= 2)
         #expect(!output.text.isEmpty)
+    }
+}
+
+struct STTLoadModelCacheTests {
+
+    /// Seeds the supplied cache with a model whose config.json is valid JSON but no model's
+    /// config, so loading must fail decoding it. A loader that drops the cache instead resolves
+    /// into `HubCache.default`, creating the model's directory there before it tries to download.
+    @Test(arguments: ["voxtral_realtime", "cohere_asr", "canary", "wav2vec2", "lasr_ctc", "moonshine"])
+    func loadModelResolvesIntoTheSuppliedCache(modelType: String) async throws {
+        let cacheDir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("stt-load-cache-\(UUID().uuidString)")
+        defer { try? FileManager.default.removeItem(at: cacheDir) }
+
+        let modelRepo = "mlx-audio-swift-tests/\(modelType)-cache-fixture"
+        let modelSubdir = modelRepo.replacingOccurrences(of: "/", with: "_")
+        let modelDir = cacheDir.appendingPathComponent("mlx-audio").appendingPathComponent(modelSubdir)
+        try FileManager.default.createDirectory(at: modelDir, withIntermediateDirectories: true)
+        try Data("[]".utf8).write(to: modelDir.appendingPathComponent("config.json"))
+        try Data([0]).write(to: modelDir.appendingPathComponent("model.safetensors"))
+
+        let defaultModelDir = HubCache.default.cacheDirectory
+            .appendingPathComponent("mlx-audio").appendingPathComponent(modelSubdir)
+        defer { try? FileManager.default.removeItem(at: defaultModelDir) }
+
+        await #expect(throws: DecodingError.self) {
+            _ = try await STT.loadModel(
+                modelRepo: modelRepo,
+                modelType: modelType,
+                cache: HubCache(cacheDirectory: cacheDir)
+            )
+        }
+        #expect(!FileManager.default.fileExists(atPath: defaultModelDir.path))
     }
 }
