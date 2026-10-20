@@ -140,6 +140,11 @@ public enum STT {
             return "whisper"
         }
         if lower.contains("granite") {
+            // granite_speech5_ctc is a separate CTC architecture with no loader here yet;
+            // routing it to granite_speech would fail on its weights instead of its type.
+            if lower.contains("ctc") {
+                return "granite_speech5_ctc"
+            }
             return "granite_speech"
         }
         return nil
