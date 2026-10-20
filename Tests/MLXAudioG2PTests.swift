@@ -2,6 +2,7 @@ import Testing
 import Foundation
 @testable import MLXAudioG2P
 import MLXAudioCore
+import HuggingFace
 
 // MARK: - Unit Tests (no model required)
 
@@ -135,6 +136,33 @@ struct T5ConfigTests {
         let config = try T5Config.load(from: tmpDir)
         #expect(config.vocabSize == 384)
         #expect(config.innerDim == 128)
+    }
+}
+
+// MARK: - Model cache
+
+struct ModelCacheWithoutConfigTests {
+
+    /// A cached snapshot with weights and no config.json is used as is (#242). Before, the
+    /// cache check only returned when config.json existed, so it downloaded again every time.
+    @Test func cachedSnapshotWithoutConfigIsReused() async throws {
+        let cacheDir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("model-cache-no-config-\(UUID().uuidString)")
+        defer { try? FileManager.default.removeItem(at: cacheDir) }
+
+        let repoID: Repo.ID = "mlx-audio-swift-tests/no-config-fixture"
+        let modelDir = cacheDir.appendingPathComponent("mlx-audio")
+            .appendingPathComponent(repoID.description.replacingOccurrences(of: "/", with: "_"))
+        try FileManager.default.createDirectory(at: modelDir, withIntermediateDirectories: true)
+        try Data([0]).write(to: modelDir.appendingPathComponent("model.safetensors"))
+
+        let resolved = try await ModelUtils.resolveOrDownloadModel(
+            repoID: repoID,
+            requiredExtension: "safetensors",
+            cache: HubCache(cacheDirectory: cacheDir)
+        )
+
+        #expect(resolved.standardizedFileURL == modelDir.standardizedFileURL)
     }
 }
 

@@ -25,3 +25,6 @@ jobs:
         run: xcodebuild build-for-testing -scheme MLXAudio-Package -destination 'platform=macOS' MACOSX_DEPLOYMENT_TARGET=14.0 CODE_SIGNING_ALLOWED=NO
       - name: Run tests
         run: xcodebuild test-without-building -scheme MLXAudio-Package -destination 'platform=macOS' -skip-testing:'MLXAudioTests/SmokeTests' CODE_SIGNING_ALLOWED=NO
+      - name: ModelCacheWithoutConfigTests with network (CI only)
+        timeout-minutes: 20
+        run: TEST_RUNNER_MLXAUDIO_ENABLE_NETWORK_TESTS=1 xcodebuild test-without-building -scheme MLXAudio-Package -destination 'platform=macOS' -only-testing:'MLXAudioTests/ModelCacheWithoutConfigTests' CODE_SIGNING_ALLOWED=NO

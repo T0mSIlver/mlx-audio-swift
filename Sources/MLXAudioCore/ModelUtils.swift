@@ -11,6 +11,7 @@ public enum ModelUtils {
         let modelURL = try await resolveOrDownloadModel(
             repoID: repoID,
             requiredExtension: "safetensors",
+            additionalMatchingPatterns: ["*.model"],
             hfToken: hfToken,
             cache: cache
         )
@@ -19,6 +20,7 @@ public enum ModelUtils {
             return (config["model_type"] as? String)
                 ?? (config["architecture"] as? String)
                 ?? (config["model_version"] as? String)
+                ?? (config["flow_lm"] != nil && config["mimi"] != nil ? "pocket_tts" : nil)
                 ?? modelNameComponents?.first?.lowercased()
         }
         return nil
@@ -100,6 +102,11 @@ public enum ModelUtils {
                         print("Cached config.json is invalid, clearing cache...")
                         Self.clearCaches(modelDir: modelDir, repoID: repoID, hubCache: cache)
                     }
+                } else {
+                    // Some repos ship no config.json. A finished snapshot fetched every
+                    // *.json, so a missing one is taken to mean the repo has none.
+                    print("Using cached model at: \(modelDir.path)")
+                    return modelDir
                 }
             } else {
                 print("Cached model appears incomplete, clearing cache...")
