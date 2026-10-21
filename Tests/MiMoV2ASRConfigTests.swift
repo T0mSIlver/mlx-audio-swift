@@ -43,6 +43,22 @@ struct MiMoV2ASRConfigTests {
         #expect(config.activeCodebookSizes(prefixCount: 8) == [1024, 1024, 128, 128, 128, 128, 128, 128])
     }
 
+    @Test func mimoAudioTokenizerConfigFillsMissingKeysWithReferenceDefaults() throws {
+        let data = #"{"d_model": 1280, "n_mels": 128}"#.data(using: .utf8)!
+        let config = try JSONDecoder().decode(MiMoAudioTokenizerConfig.self, from: data)
+
+        #expect(config.dModel == 1280)
+        #expect(config.nMels == 128)
+        #expect(config.kernelSize == 3)
+        #expect(config.activationFunction == "gelu")
+        #expect(config.encoderCausal == false)
+        #expect(config.encoderAttentionWindowSize == [-1, -1])
+        #expect(config.decoderCausal == true)
+        #expect(config.vocoderAttentionWindowSize == [40, 10])
+        #expect(config.encoderSkipLayerID == nil)
+        #expect(config.fmax == nil)
+    }
+
     @Test func mimoV2ASRConfigDecodesOfficialShape() throws {
         let json = """
         {
