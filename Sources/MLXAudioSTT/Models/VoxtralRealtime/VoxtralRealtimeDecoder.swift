@@ -344,13 +344,6 @@ final class VoxtralRealtimeDecoderLayer: Module {
     }
 }
 
-/// A materialized array a module holds outside its parameters, so weight loading,
-/// quantization and `update(parameters:)` never see it.
-final class VoxtralRealtimeConstantArray: Sendable {
-    let value: MaterializedArray
-    init(_ value: MaterializedArray) { self.value = value }
-}
-
 final class VoxtralRealtimeDecoder: Module {
     let config: VoxtralRealtimeDecoderConfig
 
@@ -360,15 +353,15 @@ final class VoxtralRealtimeDecoder: Module {
 
     var adaScales: [MLXArray?]?
 
-    private let ropeInvFreq: VoxtralRealtimeConstantArray
+    /// The `_` prefix keeps it out of the module's parameters.
+    private let _ropeInvFreq: MaterializedArray
 
     init(_ config: VoxtralRealtimeDecoderConfig) {
         self.config = config
         let invFreq = VoxtralRealtimeDecoderAttention.ropeInvFreq(
             headDim: config.headDim, ropeTheta: config.ropeTheta
         )
-        // `eval(model)` does not reach the box; `ropeInvFreq` returns it materialized.
-        self.ropeInvFreq = VoxtralRealtimeConstantArray(invFreq)
+        self._ropeInvFreq = invFreq
         self._tokEmbeddings.wrappedValue = Embedding(
             embeddingCount: config.vocabSize,
             dimensions: config.dim
@@ -415,7 +408,7 @@ final class VoxtralRealtimeDecoder: Module {
         // Shared by every layer — see `VoxtralRealtimeDecoderAttention.ropeFrequencies`.
         let (ropeCos, ropeSin) = VoxtralRealtimeDecoderAttention.ropeFrequencies(
             positions: positions,
-            ropeInvFreq: ropeInvFreq.value
+            ropeInvFreq: _ropeInvFreq
         )
 
         var newCache: [VoxtralRealtimeDecoderKVCache?] = []

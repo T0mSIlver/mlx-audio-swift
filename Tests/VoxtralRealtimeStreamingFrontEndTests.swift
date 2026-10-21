@@ -190,6 +190,16 @@ struct VoxtralRealtimeStreamingFrontEndTests {
         #expect(model.ensureMelFilters() === model.ensureMelFilters())
     }
 
+    /// Loading succeeded without them in the checkpoint; they stay out of the parameters too.
+    @Test func constantArraysAreNotParameters() throws {
+        let fixtureDir = try Self.makeRandomFixture()
+        defer { try? FileManager.default.removeItem(at: fixtureDir) }
+        let model = try VoxtralRealtimeModel.fromDirectory(fixtureDir)
+
+        let keys = model.parameters().flattened().map(\.0)
+        #expect(!keys.contains { $0.contains("melFilters") || $0.contains("ropeInvFreq") })
+    }
+
     /// The argmax evaluated with the decoder step is the token `sample` picks.
     @Test func evalPredictionReadsTheSampledToken() throws {
         let fixtureDir = try Self.makeRandomFixture()

@@ -30,7 +30,8 @@ public final class VoxtralRealtimeModel: Module, STTGenerationModel {
 
     private var tokenizer: VoxtralRealtimeTokenizer?
     /// Built once; every session and offline call reads the same filters.
-    private let melFilters: VoxtralRealtimeConstantArray
+    /// The `_` prefix keeps it out of the module's parameters.
+    private let _melFilters: MaterializedArray
     private var adaScaleDelay: Int = -1
 
     public var defaultGenerationParameters: STTGenerateParameters {
@@ -49,13 +50,11 @@ public final class VoxtralRealtimeModel: Module, STTGenerationModel {
     public init(_ config: VoxtralRealtimeConfig) {
         self.config = config
         let a = config.audioEncodingArgs
-        self.melFilters = VoxtralRealtimeConstantArray(
-            VoxtralRealtimeAudio.computeMelFilters(
-                numMelBins: a.numMelBins,
-                windowSize: a.windowSize,
-                sampleRate: a.samplingRate
-            ).asType(.float32).materialized()
-        )
+        self._melFilters = VoxtralRealtimeAudio.computeMelFilters(
+            numMelBins: a.numMelBins,
+            windowSize: a.windowSize,
+            sampleRate: a.samplingRate
+        ).asType(.float32).materialized()
         self._encoder.wrappedValue = VoxtralRealtimeAudioEncoder(
             config.encoderArgs,
             decoderDim: config.decoder.dim
@@ -331,7 +330,7 @@ extension VoxtralRealtimeModel {
     }
 
     func ensureMelFilters() -> MaterializedArray {
-        melFilters.value
+        _melFilters
     }
 
     func ensureAdaScales(transcriptionDelayMs: Int?) {
