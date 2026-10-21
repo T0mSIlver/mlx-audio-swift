@@ -53,6 +53,8 @@ public enum STT {
             return try await MossTranscribeDiarizeModel.fromPretrained(modelRepo, cache: cache)
         case "qwen3_asr":
             return try await Qwen3ASRModel.fromPretrained(modelRepo, cache: cache)
+        case "mimo_v2_asr", "mimo_audio", "mimo":
+            return try await MiMoV2ASRModel.fromPretrained(modelRepo, cache: cache)
         case "glmasr", "glm":
             return try await GLMASRModel.fromPretrained(modelRepo, cache: cache)
         case "voxtral", "voxtral_realtime":
@@ -104,6 +106,9 @@ public enum STT {
         }
         if lower.contains("glmasr") || lower.contains("glm-asr") {
             return "glmasr"
+        }
+        if lower.contains("mimo") {
+            return "mimo_v2_asr"
         }
         if lower.contains("voxtral") {
             return "voxtral_realtime"

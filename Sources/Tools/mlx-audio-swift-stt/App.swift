@@ -266,9 +266,25 @@ enum App {
             throw AppError.inputFileNotFound(inputURL.path)
         }
 
+        let loadStartTime = CFAbsoluteTimeGetCurrent()
         let model = try await loadModel(repo: options.model)
+        let modelLoadTime = CFAbsoluteTimeGetCurrent() - loadStartTime
+
+        let audioPrepStartTime = CFAbsoluteTimeGetCurrent()
         let (inputSampleRate, inputAudio) = try loadAudioArray(from: inputURL)
-        let audio = try prepareAudioForSTT(inputAudio, inputSampleRate: inputSampleRate, targetSampleRate: 16000)
+        let targetSampleRate: Int
+        switch model {
+        case .stt(let sttModel) where sttModel is MiMoV2ASRModel:
+            targetSampleRate = 24_000
+        default:
+            targetSampleRate = 16000
+        }
+        let audio = try prepareAudioForSTT(
+            inputAudio,
+            inputSampleRate: inputSampleRate,
+            targetSampleRate: targetSampleRate
+        )
+        let audioPrepTime = CFAbsoluteTimeGetCurrent() - audioPrepStartTime
 
         let startTime = CFAbsoluteTimeGetCurrent()
 
@@ -277,8 +293,8 @@ enum App {
             print("Audio path: \(inputURL.path)")
             print("Output path: \(options.outputPath!).\(options.format.rawValue)")
             print("Format: \(options.format.rawValue)")
-            if inputSampleRate != 16000 {
-                print("Resampled audio: \(inputSampleRate) Hz -> 16000 Hz")
+            if inputSampleRate != targetSampleRate {
+                print("Resampled audio: \(inputSampleRate) Hz -> \(targetSampleRate) Hz")
             }
             if options.frameThreshold != 25 {
                 print("Warning: --frame-threshold is currently ignored by this CLI.")
@@ -347,7 +363,10 @@ enum App {
             let elapsed = CFAbsoluteTimeGetCurrent() - startTime
             print("\n==========")
             print("Saved file to: \(options.outputPath!).\(options.format.rawValue)")
-            print(String(format: "Processing time: %.2f seconds", elapsed))
+            print(String(format: "Model load time: %.2f seconds", modelLoadTime))
+            print(String(format: "Audio prep time: %.2f seconds", audioPrepTime))
+            print(String(format: "Model generation time: %.2f seconds", output.totalTime))
+            print(String(format: "End-to-end post-load time: %.2f seconds", elapsed))
             print(String(format: "Prompt: %d tokens, %.3f tokens-per-sec", output.promptTokens, output.promptTps))
             print(String(format: "Generation: %d tokens, %.3f tokens-per-sec", output.generationTokens, output.generationTps))
             print(String(format: "Peak memory: %.2f GB", output.peakMemoryUsage))
@@ -449,6 +468,10 @@ enum App {
 
         if lower.contains("forcedalign") || lower.contains("forced-align") {
             return .forcedAligner(try await Qwen3ForcedAlignerModel.fromPretrained(repo))
+        }
+        if lower.contains("mimo") {
+            // MiMo's config may not name MiMo in model_type (it defaults to qwen2), so route by name.
+            return .stt(try await MiMoV2ASRModel.fromPretrained(repo))
         }
         return .stt(try await STT.loadModel(modelRepo: repo))
     }
