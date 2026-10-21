@@ -4,12 +4,11 @@ import MLXAudioCore
 
 enum VoxtralRealtimeAudio {
     /// Periodic Hann window: N denominator, not N-1.
-    static func periodicHannWindow(size: Int) -> MLXArray {
+    static func periodicHannWindow(size: Int) -> MaterializedArray {
         let n = MLXArray(0..<size).asType(.float32)
         let window = 0.5 * (1.0 - cos((2.0 * Float.pi * n) / Float(size)))
         // The stream keeps this for its lifetime, so materialize it once here.
-        eval(window)
-        return window
+        return window.materialized()
     }
 
     static func computeMelFilters(
@@ -147,7 +146,7 @@ enum VoxtralRealtimeAudio {
 /// frame count match the offline count exactly.
 struct VoxtralRealtimeMelStream {
     private let melFilters: MLXArray
-    private let window: MLXArray
+    private let window: MaterializedArray
     private let windowSize: Int
     private let hopLength: Int
     private let globalLogMelMax: Float

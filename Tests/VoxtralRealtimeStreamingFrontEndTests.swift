@@ -181,6 +181,15 @@ struct VoxtralRealtimeStreamingFrontEndTests {
         #expect(session.tokens.count == offline.generationTokens)
     }
 
+    /// Sessions and offline calls share one materialized filter bank.
+    @Test func melFiltersAreBuiltOnce() throws {
+        let fixtureDir = try Self.makeRandomFixture()
+        defer { try? FileManager.default.removeItem(at: fixtureDir) }
+        let model = try VoxtralRealtimeModel.fromDirectory(fixtureDir)
+
+        #expect(model.ensureMelFilters() === model.ensureMelFilters())
+    }
+
     /// The argmax evaluated with the decoder step is the token `sample` picks.
     @Test func evalPredictionReadsTheSampledToken() throws {
         let fixtureDir = try Self.makeRandomFixture()

@@ -29,6 +29,8 @@ public final class VoxtralRealtimeModel: Module, STTGenerationModel {
     @ModuleInfo(key: "decoder") var decoder: VoxtralRealtimeDecoder
 
     private var tokenizer: VoxtralRealtimeTokenizer?
+    /// Built once; every session and offline call reads the same filters.
+    private let melFilters: VoxtralRealtimeConstantArray
     private var adaScaleDelay: Int = -1
 
     public var defaultGenerationParameters: STTGenerateParameters {
@@ -46,6 +48,14 @@ public final class VoxtralRealtimeModel: Module, STTGenerationModel {
 
     public init(_ config: VoxtralRealtimeConfig) {
         self.config = config
+        let a = config.audioEncodingArgs
+        self.melFilters = VoxtralRealtimeConstantArray(
+            VoxtralRealtimeAudio.computeMelFilters(
+                numMelBins: a.numMelBins,
+                windowSize: a.windowSize,
+                sampleRate: a.samplingRate
+            ).asType(.float32).materialized()
+        )
         self._encoder.wrappedValue = VoxtralRealtimeAudioEncoder(
             config.encoderArgs,
             decoderDim: config.decoder.dim
@@ -320,13 +330,8 @@ extension VoxtralRealtimeModel {
         return MLX.padded(audio, widths: [IntOrPair((leftPad, rightPad))])
     }
 
-    func ensureMelFilters() -> MLXArray {
-        let a = config.audioEncodingArgs
-        return VoxtralRealtimeAudio.computeMelFilters(
-            numMelBins: a.numMelBins,
-            windowSize: a.windowSize,
-            sampleRate: a.samplingRate
-        ).asType(.float32)
+    func ensureMelFilters() -> MaterializedArray {
+        melFilters.value
     }
 
     func ensureAdaScales(transcriptionDelayMs: Int?) {
@@ -527,7 +532,6 @@ public extension VoxtralRealtimeModel {
                 ]
             )
         }
-        _ = model.ensureMelFilters()
 
         let files = try FileManager.default.contentsOfDirectory(at: modelDir, includingPropertiesForKeys: nil)
         let safetensors = files.filter { $0.pathExtension == "safetensors" }

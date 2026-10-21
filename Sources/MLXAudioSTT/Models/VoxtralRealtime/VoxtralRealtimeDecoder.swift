@@ -209,12 +209,11 @@ final class VoxtralRealtimeDecoderAttention: Module {
 
     }
 
-    fileprivate static func ropeInvFreq(headDim: Int, ropeTheta: Float) -> MLXArray {
+    fileprivate static func ropeInvFreq(headDim: Int, ropeTheta: Float) -> MaterializedArray {
         let idx = MLXArray(stride(from: 0, to: headDim, by: 2)).asType(.float32)
         let invFreq = 1.0 / MLX.pow(MLXArray(ropeTheta), idx / Float(headDim))
         // Cached for the decoder's lifetime and shared by concurrent sessions.
-        MLX.eval(invFreq)
-        return invFreq
+        return invFreq.materialized()
     }
 
     /// Interleaved-RoPE cos/sin tables for `positions`. Every decoder layer rotates
@@ -345,6 +344,13 @@ final class VoxtralRealtimeDecoderLayer: Module {
     }
 }
 
+/// A materialized array a module holds outside its parameters, so weight loading,
+/// quantization and `update(parameters:)` never see it.
+final class VoxtralRealtimeConstantArray: Sendable {
+    let value: MaterializedArray
+    init(_ value: MaterializedArray) { self.value = value }
+}
+
 final class VoxtralRealtimeDecoder: Module {
     let config: VoxtralRealtimeDecoderConfig
 
@@ -354,20 +360,15 @@ final class VoxtralRealtimeDecoder: Module {
 
     var adaScales: [MLXArray?]?
 
-    /// Keeps `ropeInvFreq` out of the module's parameters.
-    private final class ArrayBox {
-        let value: MLXArray
-        init(_ value: MLXArray) { self.value = value }
-    }
-    private let ropeInvFreq: ArrayBox
+    private let ropeInvFreq: VoxtralRealtimeConstantArray
 
     init(_ config: VoxtralRealtimeDecoderConfig) {
         self.config = config
         let invFreq = VoxtralRealtimeDecoderAttention.ropeInvFreq(
             headDim: config.headDim, ropeTheta: config.ropeTheta
         )
-        // `eval(model)` does not reach the box; `ropeInvFreq` returns it evaluated.
-        self.ropeInvFreq = ArrayBox(invFreq)
+        // `eval(model)` does not reach the box; `ropeInvFreq` returns it materialized.
+        self.ropeInvFreq = VoxtralRealtimeConstantArray(invFreq)
         self._tokEmbeddings.wrappedValue = Embedding(
             embeddingCount: config.vocabSize,
             dimensions: config.dim
