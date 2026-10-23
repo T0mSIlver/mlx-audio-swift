@@ -90,7 +90,8 @@ let package = Package(
                 .product(name: "HuggingFace", package: "swift-huggingface"),
                 .product(name: "Transformers", package: "swift-transformers"),
             ],
-            path: "Sources/MLXAudioCodecs"
+            path: "Sources/MLXAudioCodecs",
+            exclude: ["MiMoAudioTokenizer/README.md", "NemotronVoiceChat/README.md"]
         ),
 
         // MARK: - MLXAudioTTS
@@ -144,11 +145,18 @@ let package = Package(
             exclude: [
                 "Models/CohereTranscribe/README.md",
                 "Models/FireRedASR2/README.md",
+                "Models/FunASRNano/README.md",
                 "Models/GLMASR/README.md",
+                "Models/HiggsAudio3/README.md",
                 "Models/GraniteSpeech/README.md",
+                "Models/GraniteSpeechNAR/README.md",
+                "Models/GraniteSpeech5CTC/README.md",
+                "Models/MegaASR/README.md",
                 "Models/MossTranscribeDiarize/README.md",
                 "Models/NemotronASR/README.md",
                 "Models/Parakeet/README.md",
+                "Models/Phonon2/README.md",
+                "Models/Qwen2Audio/README.md",
                 "Models/Qwen3ASR/README.md",
                 "Models/SenseVoice/README.md",
                 "Models/VoxtralRealtime/README.md",
