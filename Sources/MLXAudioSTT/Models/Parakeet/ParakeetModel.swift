@@ -21,9 +21,11 @@ public final class ParakeetModel: Module, STTGenerationModel {
     public let maxSymbols: Int?
 
     /// Compute dtype applied to encoder features and decoder LSTM state.
-    /// Defaults to `.bfloat16` (measured ~8% wall-clock speedup on batched decode
-    /// with ~0.2% word drift). Set to `.float32` via the factory method to fall back.
+    /// Factory methods default to `.float32` for Redux and `.bfloat16` for other variants.
     public var computeDType: DType = .bfloat16
+    /// Phonon-2 computes the frontend in fp32 after rounding input to the requested compute dtype.
+    var usesPhonon2Frontend = false
+    var usesReduxDecoding = false
 
     enum TDTDecoderImplementation: Sendable {
         case serial
@@ -52,7 +54,7 @@ public final class ParakeetModel: Module, STTGenerationModel {
     var tdtDecoderImplementation: TDTDecoderImplementation?
     var encoderExecutionImplementation: EncoderExecutionImplementation?
     var tdtTraceEmitter: (@Sendable (TDTTraceStep) -> Void)?
-    private var compiledEncoderFeaturesByShape: [String: @Sendable (MLXArray) -> MLXArray] = [:]
+    private var compiledEncoderFeaturesByShape: [String: (MLXArray) -> MLXArray] = [:]
 
     public var defaultGenerationParameters: STTGenerateParameters {
         STTGenerateParameters(
@@ -304,18 +306,20 @@ public final class ParakeetModel: Module, STTGenerationModel {
     }
 
     func encodeBatchFeatures(_ features: MLXArray, lengths: MLXArray? = nil) -> (MLXArray, MLXArray) {
-        let resolvedLengths = lengths ?? MLXArray(Array(repeating: Int32(features.shape[1]), count: features.shape[0])).asType(.int32)
+        let resolvedLengths = lengths ?? MLXArray(Array(repeating: Int32(features.shape[1] - (encoderConfig.maskPadding ? 1 : 0)), count: features.shape[0])).asType(.int32)
         switch encoderExecutionImplementation ?? .plain {
         case .plain:
             return encoder(features, lengths: resolvedLengths)
         case .compiled:
+            // Masked encoders require each recording's lengths, not just the padded shape.
+            if encoderConfig.maskPadding { return encoder(features, lengths: resolvedLengths) }
             let encodedFeatures = compiledEncoderFeatures(for: features)(features)
             let encodedLengths = computeEncodedLengths(from: resolvedLengths)
             return (encodedFeatures, encodedLengths)
         }
     }
 
-    func compiledEncoderFeatures(for features: MLXArray) -> @Sendable (MLXArray) -> MLXArray {
+    func compiledEncoderFeatures(for features: MLXArray) -> (MLXArray) -> MLXArray {
         let key = "\(features.shape)-\(features.dtype)"
         if let compiled = compiledEncoderFeaturesByShape[key] {
             return compiled
@@ -379,7 +383,7 @@ public final class ParakeetModel: Module, STTGenerationModel {
         )
         eval(batchFeatures, lengths)
 
-        switch tdtDecoderImplementation ?? .serial {
+        switch usesReduxDecoding ? .serial : (tdtDecoderImplementation ?? .serial) {
         case .serial:
             return decodeTDTSerial(batchFeatures: batchFeatures, lengths: lengths, decoder: decoder, joint: joint)
         case .hybrid:
@@ -410,7 +414,9 @@ public final class ParakeetModel: Module, STTGenerationModel {
             var state = makeInitialDecoderState(batchSize: 1, dtype: computeDType)
             var currentToken = MLXArray(Int32(lastToken)).reshaped([1, 1]).asType(.int32)
 
-            while t < maxLength {
+            var steps = 0
+            while t < maxLength && (!usesReduxDecoding || steps < (maxSymbols ?? 10) * maxLength) {
+                steps += 1
                 let frame = featureSeq[0..., t..<(t + 1), 0...]
 
                 let stepOutputs = compiledTDTStep([
@@ -426,15 +432,22 @@ public final class ParakeetModel: Module, STTGenerationModel {
                 let decisionPair = decisions.asArray(Int32.self)
                 let token = Int(decisionPair[0])
                 let decisionIndex = Int(decisionPair[1])
-                let step = ParakeetDecodingLogic.tdtStep(
-                    predictedToken: token,
-                    blankToken: blankToken,
-                    decisionIndex: decisionIndex,
-                    durations: durations,
-                    time: t,
-                    newSymbols: newSymbols,
-                    maxSymbols: maxSymbols
-                )
+                let step: ParakeetDecodingLogic.TDTReductionResult
+                if usesReduxDecoding {
+                    let duration = durations[decisionIndex]
+                    let jump = token == blankToken ? max(1, duration) : duration
+                    step = .init(nextTime: t + jump, nextNewSymbols: 0, jump: jump, emittedToken: token != blankToken)
+                } else {
+                    step = ParakeetDecodingLogic.tdtStep(
+                        predictedToken: token,
+                        blankToken: blankToken,
+                        decisionIndex: decisionIndex,
+                        durations: durations,
+                        time: t,
+                        newSymbols: newSymbols,
+                        maxSymbols: maxSymbols
+                    )
+                }
 
                 tdtTraceEmitter?(
                     TDTTraceStep(
@@ -823,7 +836,7 @@ public final class ParakeetModel: Module, STTGenerationModel {
             melFeatures.allSatisfy { $0.ndim == 2 && $0.shape[1] == preprocessConfig.features },
             "Parakeet batch mel feature shape mismatch before stacking; expected trailing dim \(preprocessConfig.features)"
         )
-        let frameLengths = melFeatures.map { Int32($0.shape[0]) }
+        let frameLengths = melFeatures.map { Int32($0.shape[0] - (preprocessConfig.normalizeValidFrames ? 1 : 0)) }
         let maxFrameLength = melFeatures.map { $0.shape[0] }.max() ?? 0
         let padded = melFeatures.map { padMelFeatures($0, targetFrameLength: maxFrameLength) }
 
@@ -840,7 +853,20 @@ public final class ParakeetModel: Module, STTGenerationModel {
     }
 
     private func makeMelFeatures(from audio: MLXArray) -> MLXArray {
-        ParakeetAudio.logMelSpectrogram(audio, config: preprocessConfig).squeezed(axis: 0)
+        if usesPhonon2Frontend {
+            var waveform = audio.asType(computeDType)
+            let minimum = 2 * preprocessConfig.hopLength
+            if waveform.size < minimum {
+                waveform = MLX.padded(waveform, widths: [.init((0, minimum - waveform.size))])
+            }
+            return ParakeetAudio.logMelSpectrogram(waveform.asType(.float32), config: preprocessConfig)
+                .squeezed(axis: 0).asType(computeDType)
+        }
+        var waveform = audio
+        if preprocessConfig.normalizeValidFrames, waveform.size < 2 * preprocessConfig.hopLength {
+            waveform = MLX.padded(waveform, widths: [.init((0, 2 * preprocessConfig.hopLength - waveform.size))])
+        }
+        return ParakeetAudio.logMelSpectrogram(waveform, config: preprocessConfig).squeezed(axis: 0)
     }
 
     private func padMelFeatures(_ mel: MLXArray, targetFrameLength: Int) -> MLXArray {
@@ -868,7 +894,7 @@ public final class ParakeetModel: Module, STTGenerationModel {
     }
 
     private func decodeChunk(_ chunkAudio: MLXArray) -> ParakeetAlignedResult {
-        let mel = ParakeetAudio.logMelSpectrogram(chunkAudio, config: preprocessConfig)
+        let mel = makeMelFeatures(from: chunkAudio).expandedDimensions(axis: 0)
         return decode(mel: mel)[0]
     }
 
@@ -896,7 +922,7 @@ private func makeCompiledTDTStep(
     decoder: ParakeetPredictNetwork?,
     joint: ParakeetJointNetwork?,
     blankTokenId: Int
-) -> @Sendable ([MLXArray]) -> [MLXArray] {
+) -> ([MLXArray]) -> [MLXArray] {
     guard let decoder, let joint else {
         return { arrays in
             [MLXArray([Int32(0), Int32(0)]), arrays[2], arrays[3]]
@@ -947,14 +973,20 @@ public extension ParakeetModel {
 
     static func fromDirectory(
         _ modelDir: URL,
-        computeDType: DType = .bfloat16
+        computeDType: DType? = nil
     ) throws -> ParakeetModel {
         let configURL = modelDir.appendingPathComponent("config.json")
         let rawConfigData = try Data(contentsOf: configURL)
         let configData = normalizedConfigData(rawConfigData)
-        let rawConfig = try JSONDecoder().decode(ParakeetRawConfig.self, from: configData)
+        let object = try JSONSerialization.jsonObject(with: configData) as? [String: Any]
+        let redux = object?["ternary_modules"] != nil ? try ParakeetReduxConfig.decode(configData) : nil
+        let rawConfig = try redux?.modelConfig(tokenizerAt: modelDir.appendingPathComponent("tokenizer.json"))
+            ?? JSONDecoder().decode(ParakeetRawConfig.self, from: configData)
+        try redux?.validateManifest(in: modelDir)
         let quantConfig = try JSONDecoder().decode(ParakeetQuantizationConfig.self, from: configData)
-        let variant = try ParakeetVariantResolver.resolve(rawConfig)
+        let phonon2 = object?["model_type"] as? String == "phonon2"
+            ? try JSONDecoder().decode(Phonon2Config.self, from: configData) : nil
+        let variant = try (phonon2 != nil ? ParakeetVariant.tdt : ParakeetVariantResolver.resolve(rawConfig))
 
         let model: ParakeetModel
         switch variant {
@@ -1012,6 +1044,10 @@ public extension ParakeetModel {
             )
         }
 
+        let packedLayers = try phonon2.map { try model.configurePhonon2($0) } ?? []
+        model.usesReduxDecoding = redux != nil
+        model.usesPhonon2Frontend = phonon2 != nil
+
         var weights: [String: MLXArray] = [:]
         let files = try FileManager.default.contentsOfDirectory(at: modelDir, includingPropertiesForKeys: nil)
         let safetensors = files.filter { $0.pathExtension == "safetensors" }
@@ -1020,9 +1056,21 @@ public extension ParakeetModel {
             weights.merge(shard) { _, new in new }
         }
 
-        let sanitized = sanitize(weights: weights, variant: model.variant)
+        if phonon2 != nil {
+            for (name, value) in weights {
+                if (name.hasSuffix(".base_q") || name.hasSuffix(".residual_q")) && value.dtype != .uint32 {
+                    throw Phonon2Error.invalidPackedWeight("\(name) must remain uint32")
+                }
+                if (name.hasSuffix(".row_lo") || name.hasSuffix(".row_hi")) && value.dtype != .float16 {
+                    throw Phonon2Error.invalidPackedWeight("\(name) must remain float16")
+                }
+            }
+        }
+        let adapted = try redux?.sanitize(weights) ?? weights
+        let sanitized = sanitize(weights: adapted, variant: model.variant)
 
-        if let perLayerQuant = quantConfig.perLayerQuantization {
+        if let redux { try redux.configure(model, weights: sanitized) }
+        if phonon2 == nil, redux == nil, let perLayerQuant = quantConfig.perLayerQuantization {
             quantize(model: model) { path, _ in
                 if sanitized["\(path).scales"] != nil {
                     return perLayerQuant.quantization(layer: path)?.asTuple
@@ -1033,20 +1081,23 @@ public extension ParakeetModel {
 
         try model.update(parameters: ModuleParameters.unflattened(sanitized), verify: .all)
 
+        let computeDType = computeDType ?? (redux != nil ? .float32 : .bfloat16)
         model.computeDType = computeDType
 
-        // Cast all floating-point params to computeDType after load.
-        // Skips params already matching target dtype and leaves non-float (e.g. uint32
-        // packed quantized) weights untouched.
+        // Cast dense floating-point parameters to the requested compute dtype.
+        // Packed weights and their learned scales/palettes retain checkpoint dtypes.
         let casted = Dictionary(
             uniqueKeysWithValues: model.parameters().flattened().map { key, value -> (String, MLXArray) in
-                guard value.dtype.isFloatingPoint, value.dtype != computeDType else {
+                guard value.dtype.isFloatingPoint, value.dtype != computeDType,
+                    !(phonon2 != nil && (key.hasSuffix(".row_lo") || key.hasSuffix(".row_hi"))),
+                    !(redux != nil && (key.hasSuffix(".scales") || key.hasSuffix(".biases"))) else {
                     return (key, value)
                 }
                 return (key, value.asType(computeDType))
             }
         )
         try model.update(parameters: ModuleParameters.unflattened(casted), verify: .noUnusedKeys)
+        for layer in packedLayers { layer.materialize() }
 
         model.train(false)
         eval(model)
@@ -1055,7 +1106,7 @@ public extension ParakeetModel {
 
     static func fromPretrained(
         _ modelPath: String,
-        computeDType: DType = .bfloat16,
+        computeDType: DType? = nil,
         cache: HubCache = .default
     ) async throws -> ParakeetModel {
         let hfToken: String? = ProcessInfo.processInfo.environment["HF_TOKEN"]
