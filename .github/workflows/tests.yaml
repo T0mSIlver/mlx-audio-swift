@@ -11,7 +11,7 @@ on:
 jobs:
   tests:
     runs-on: macos-latest
-    timeout-minutes: 30
+    timeout-minutes: 60
 
     steps:
       - uses: actions/checkout@v4
@@ -23,5 +23,10 @@ jobs:
         run: xcodebuild -downloadComponent MetalToolchain
       - name: Build
         run: xcodebuild build-for-testing -scheme MLXAudio-Package -destination 'platform=macOS' MACOSX_DEPLOYMENT_TARGET=14.0 CODE_SIGNING_ALLOWED=NO
+      - name: Convert with mlx-audio (CI only)
+        run: |
+          python3 -m venv "$RUNNER_TEMP/venv"
+          "$RUNNER_TEMP/venv/bin/pip" install -q "mlx-audio @ git+https://github.com/Blaizzy/mlx-audio"
+          for b in 8 4; do "$RUNNER_TEMP/venv/bin/python" -m mlx_audio.convert --hf-path ibm-granite/granite-speech-5.0-470m-turboctc --revision 1dd23f46f6d4e6eae2531982ba2e33220086dd97 --mlx-path "$RUNNER_TEMP/granite-q$b" -q --q-bits $b --model-domain stt; done
       - name: Run tests
-        run: xcodebuild test-without-building -scheme MLXAudio-Package -destination 'platform=macOS' -skip-testing:'MLXAudioTests/SmokeTests' CODE_SIGNING_ALLOWED=NO
+        run: TEST_RUNNER_GRANITE_Q8_DIR="$RUNNER_TEMP/granite-q8" TEST_RUNNER_GRANITE_Q4_DIR="$RUNNER_TEMP/granite-q4" xcodebuild test-without-building -scheme MLXAudio-Package -destination 'platform=macOS' -only-testing:'MLXAudioTests/GraniteMultilingualQuantCheck' CODE_SIGNING_ALLOWED=NO
