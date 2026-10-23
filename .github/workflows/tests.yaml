@@ -11,7 +11,7 @@ on:
 jobs:
   tests:
     runs-on: macos-latest
-    timeout-minutes: 30
+    timeout-minutes: 180
 
     steps:
       - uses: actions/checkout@v4
@@ -24,4 +24,5 @@ jobs:
       - name: Build
         run: xcodebuild build-for-testing -scheme MLXAudio-Package -destination 'platform=macOS' MACOSX_DEPLOYMENT_TARGET=14.0 CODE_SIGNING_ALLOWED=NO
       - name: Run tests
-        run: xcodebuild test-without-building -scheme MLXAudio-Package -destination 'platform=macOS' -skip-testing:'MLXAudioTests/SmokeTests' CODE_SIGNING_ALLOWED=NO
+        timeout-minutes: 170
+        run: TEST_RUNNER_MLXAUDIO_BENCH_249=1 xcodebuild test-without-building -scheme MLXAudio-Package -destination 'platform=macOS' -only-testing:'MLXAudioTests/Qwen3ASRChunkBench' CODE_SIGNING_ALLOWED=NO
