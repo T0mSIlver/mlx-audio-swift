@@ -851,7 +851,8 @@ public final class OmniVoiceModel: Module, SpeechGenerationModel, @unchecked Sen
         let configURL = try await ModelUtils.resolveOrDownloadModel(
             repoID: repo,
             requiredExtension: "json",
-            additionalMatchingPatterns: ["config.json"]
+            additionalMatchingPatterns: ["config.json"],
+            cache: cache
         ).appendingPathComponent("config.json")
 
         let configData = try Data(contentsOf: configURL)
@@ -860,7 +861,8 @@ public final class OmniVoiceModel: Module, SpeechGenerationModel, @unchecked Sen
         let weightsURL = try await ModelUtils.resolveOrDownloadModel(
             repoID: repo,
             requiredExtension: ".safetensors",
-            additionalMatchingPatterns: ["model.safetensors"]
+            additionalMatchingPatterns: ["model.safetensors"],
+            cache: cache
         ).appendingPathComponent("model.safetensors")
         let rawWeights = try MLX.loadArrays(url: weightsURL)
 
@@ -912,7 +914,8 @@ public final class OmniVoiceModel: Module, SpeechGenerationModel, @unchecked Sen
             let dir = try await ModelUtils.resolveOrDownloadModel(
                 repoID: repo,
                 requiredExtension: "json",
-                additionalMatchingPatterns: ["tokenizer.json"]
+                additionalMatchingPatterns: ["tokenizer.json"],
+                cache: cache
             )
             return dir
         }())
@@ -1676,7 +1679,8 @@ public final class OmniVoiceAudioTokenizer: Module {
         let configURL = try await ModelUtils.resolveOrDownloadModel(
             repoID: repo,
             requiredExtension: "json",
-            additionalMatchingPatterns: ["audio_tokenizer/config.json"]
+            additionalMatchingPatterns: ["audio_tokenizer/config.json"],
+            cache: cache
         ).appendingPathComponent("audio_tokenizer/config.json")
 
         let configData = try Data(contentsOf: configURL)
@@ -1685,7 +1689,8 @@ public final class OmniVoiceAudioTokenizer: Module {
         let weightsURL = try await ModelUtils.resolveOrDownloadModel(
             repoID: repo,
             requiredExtension: ".safetensors",
-            additionalMatchingPatterns: ["audio_tokenizer/model.safetensors"]
+            additionalMatchingPatterns: ["audio_tokenizer/model.safetensors"],
+            cache: cache
         ).appendingPathComponent("audio_tokenizer/model.safetensors")
         let rawWeights = try MLX.loadArrays(url: weightsURL)
         let inferredNCodebooks = Self.inferNCodebooks(from: rawWeights) ?? 9
