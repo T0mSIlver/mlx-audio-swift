@@ -25,6 +25,14 @@ public enum TTS {
         case repository(String, cache: HubCache)
         case localDirectory(URL, repoHint: String)
 
+        /// Where text processors keep their own downloads.
+        var cache: HubCache {
+            switch self {
+            case .repository(_, let cache): cache
+            case .localDirectory: .default
+            }
+        }
+
         var fallbackName: String {
             switch self {
             case .repository(let modelRepo, _):
@@ -181,7 +189,7 @@ public enum TTS {
                 pretrained: { try await SopranoModel.fromPretrained($0, cache: $1) },
                 local: { modelDir, repoHint in try await SopranoModel.fromModelDirectory(modelDir, repo: repoHint) }
             )
-        case "pocket_tts":
+        case "pocket_tts", "phonon":
             return try await load(
                 source,
                 modelType: resolvedType,
@@ -192,11 +200,11 @@ public enum TTS {
             return try await load(
                 source,
                 modelType: resolvedType,
-                pretrained: { modelRepo, _ in try await ChatterboxModel.fromPretrained(modelRepo) },
+                pretrained: { try await ChatterboxModel.fromPretrained($0, cache: $1) },
                 local: { modelDir, _ in try await ChatterboxModel.fromModelDirectory(modelDir, hfToken: nil) }
             )
         case "kitten_tts", "kitten":
-            let processor = textProcessor ?? MisakiTextProcessor()
+            let processor = textProcessor ?? MisakiTextProcessor(cache: source.cache)
             return try await load(
                 source,
                 modelType: resolvedType,
@@ -204,7 +212,7 @@ public enum TTS {
                 local: { modelDir, _ in try await KittenTTSModel.fromModelDirectory(modelDir, textProcessor: processor) }
             )
         case "kokoro", "kokoro_tts":
-            let processor = textProcessor ?? KokoroMultilingualProcessor()
+            let processor = textProcessor ?? KokoroMultilingualProcessor(cache: source.cache)
             return try await load(
                 source,
                 modelType: resolvedType,
@@ -297,6 +305,7 @@ public enum TTS {
         return (config["model_type"] as? String)
             ?? (config["architecture"] as? String)
             ?? (config["model_version"] as? String)
+            ?? (config["flow_lm"] != nil && config["mimi"] != nil ? "pocket_tts" : nil)
     }
 
     private static func inferModelType(from modelRepo: String) -> String? {
@@ -346,7 +355,7 @@ public enum TTS {
         if lower.contains("csm") || lower.contains("sesame") {
             return "csm"
         }
-        if lower.contains("pocket_tts") {
+        if lower.contains("pocket_tts") || lower.contains("pocket-tts") || lower.contains("phonon") {
             return "pocket_tts"
         }
         if lower.contains("chatterbox") {
