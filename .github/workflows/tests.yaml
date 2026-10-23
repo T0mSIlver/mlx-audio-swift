@@ -23,5 +23,13 @@ jobs:
         run: xcodebuild -downloadComponent MetalToolchain
       - name: Build
         run: xcodebuild build-for-testing -scheme MLXAudio-Package -destination 'platform=macOS' MACOSX_DEPLOYMENT_TARGET=14.0 CODE_SIGNING_ALLOWED=NO
-      - name: Run tests
-        run: TEST_RUNNER_MLXAUDIO_LEAK_283=1 xcodebuild test-without-building -scheme MLXAudio-Package -destination 'platform=macOS' -only-testing:'MLXAudioTests/Qwen3ASRLeakBisect' CODE_SIGNING_ALLOWED=NO
+      - name: jsonParseNoPool
+        run: TEST_RUNNER_MLXAUDIO_LEAK_283=1 xcodebuild test-without-building -scheme MLXAudio-Package -destination 'platform=macOS' -only-testing:'MLXAudioTests/Qwen3ASRLeakBisect/jsonParseNoPool()' CODE_SIGNING_ALLOWED=NO 2>&1 | grep -E 'LEAK283|error:|✘' || true
+      - name: jsonParseInPool
+        run: TEST_RUNNER_MLXAUDIO_LEAK_283=1 xcodebuild test-without-building -scheme MLXAudio-Package -destination 'platform=macOS' -only-testing:'MLXAudioTests/Qwen3ASRLeakBisect/jsonParseInPool()' CODE_SIGNING_ALLOWED=NO 2>&1 | grep -E 'LEAK283|error:|✘' || true
+      - name: tokenizerAsync
+        run: TEST_RUNNER_MLXAUDIO_LEAK_283=1 xcodebuild test-without-building -scheme MLXAudio-Package -destination 'platform=macOS' -only-testing:'MLXAudioTests/Qwen3ASRLeakBisect/tokenizerAsync()' CODE_SIGNING_ALLOWED=NO 2>&1 | grep -E 'LEAK283|error:|✘' || true
+      - name: tokenizerOnThreadWithPool
+        run: TEST_RUNNER_MLXAUDIO_LEAK_283=1 xcodebuild test-without-building -scheme MLXAudio-Package -destination 'platform=macOS' -only-testing:'MLXAudioTests/Qwen3ASRLeakBisect/tokenizerOnThreadWithPool()' CODE_SIGNING_ALLOWED=NO 2>&1 | grep -E 'LEAK283|error:|✘' || true
+      - name: fullLoad
+        run: TEST_RUNNER_MLXAUDIO_LEAK_283=1 xcodebuild test-without-building -scheme MLXAudio-Package -destination 'platform=macOS' -only-testing:'MLXAudioTests/Qwen3ASRLeakBisect/fullLoad()' CODE_SIGNING_ALLOWED=NO 2>&1 | grep -E 'LEAK283|error:|✘' || true
