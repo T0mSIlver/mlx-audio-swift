@@ -5,6 +5,7 @@ import MLX
 import MLXAudioCore
 @testable import MLXAudioSTT
 import Testing
+import Hub
 import Tokenizers
 
 /// CI-only bisect for Blaizzy#283: which part of Qwen3ASRModel.fromModelDirectory keeps process
@@ -73,23 +74,30 @@ struct Qwen3ASRLeakBisect {
         }
     }
 
-    @Test func tokenizerOnThreadWithPool() async throws {
+    static func tokenizerConfigs(_ dir: URL) async throws -> (Config, Config) {
+        let config = LanguageModelConfigurationFromHub(modelFolder: dir)
+        return (try await config.tokenizerConfig!, try await config.tokenizerData)
+    }
+
+    @Test func configLoadOnly() async throws {
         guard Self.enabled else { return }
         let dir = try await Self.modelDir()
-        try await Self.phase("tokenizer_thread_pool", cycles: 20) {
-            try await withCheckedThrowingContinuation { (cont: CheckedContinuation<Void, Error>) in
-                let thread = Thread {
-                    autoreleasepool {
-                        let sem = DispatchSemaphore(value: 0)
-                        var failure: Error?
-                        // Build on this thread's pool: the async loader only reads files.
-                        Task.detached { do { _ = try await AutoTokenizer.from(modelFolder: dir) } catch { failure = error }; sem.signal() }
-                        sem.wait()
-                        if let failure { cont.resume(throwing: failure) } else { cont.resume() }
-                    }
-                }
-                thread.start()
-            }
+        try await Self.phase("config_load_only", cycles: 20) { _ = try await Self.tokenizerConfigs(dir) }
+    }
+
+    @Test func constructNoPool() async throws {
+        guard Self.enabled else { return }
+        let (tokenizerConfig, tokenizerData) = try await Self.tokenizerConfigs(try await Self.modelDir())
+        try await Self.phase("construct_no_pool", cycles: 20) {
+            _ = try AutoTokenizer.from(tokenizerConfig: tokenizerConfig, tokenizerData: tokenizerData)
+        }
+    }
+
+    @Test func constructInPool() async throws {
+        guard Self.enabled else { return }
+        let (tokenizerConfig, tokenizerData) = try await Self.tokenizerConfigs(try await Self.modelDir())
+        try await Self.phase("construct_in_pool", cycles: 20) {
+            try autoreleasepool { _ = try AutoTokenizer.from(tokenizerConfig: tokenizerConfig, tokenizerData: tokenizerData) }
         }
     }
 
