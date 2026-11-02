@@ -34,6 +34,9 @@ final class NemotronASRStreamRNNTState {
     var lastToken: Int
     var decoderState: NemoLSTMState?
     var globalTime = 0  // absolute subsampled-frame index, for token timestamps
+    var booster: NemotronASRTermBooster?
+    /// Tokens the boost chose over the unbiased argmax, across every list.
+    var boostedTokenCount = 0
 
     init(blankToken: Int) { lastToken = blankToken }
 }
@@ -62,7 +65,15 @@ extension NemotronASRModel {
                 cell: decoderOutput.1.cell?.asType(frame.dtype)
             )
             let jointOutput = joint(frame, pred)
-            let token = jointOutput.argMax(axis: -1).item(Int.self)
+            var token = jointOutput.argMax(axis: -1).item(Int.self)
+            if let booster = state.booster, token != blankTokenID {
+                let greedy = token
+                token = booster.choose(
+                    logits: jointOutput.reshaped([-1]).asType(.float32).asArray(Float.self),
+                    greedy: greedy
+                )
+                if token != greedy { state.boostedTokenCount += 1 }
+            }
             let step = NemoDecodingLogic.rnntStep(
                 predictedToken: token,
                 blankToken: blankTokenID,
@@ -73,6 +84,7 @@ extension NemotronASRModel {
             if step.emittedToken {
                 state.lastToken = token
                 state.decoderState = proposedState
+                state.booster?.accept(token)
                 if !NemotronASRTokenizer.isSpecialToken(token, vocabulary: vocabulary) {
                     state.results.append(
                         NemoAlignedToken(
@@ -139,6 +151,20 @@ public final class NemotronASRStreamSession {
     public var tokens: [Int] { rnntState.results.map { $0.id } }
     /// Whether `finish()` has been called.
     public var isFinished: Bool { done }
+    /// Tokens the term boost chose over the unbiased argmax so far.
+    public var boostedTokenCount: Int { rnntState.boostedTokenCount }
+
+    /// Boost `terms` while decoding from here on; an empty list turns the boost
+    /// off. A later call replaces the list and drops any match under way, but
+    /// keeps the running `boostedTokenCount`.
+    public func setBoostTerms(_ terms: [String], config: NemotronASRTermBoostConfig = .init()) {
+        rnntState.booster = NemotronASRTermBooster(
+            terms: terms,
+            vocabulary: model.vocabulary,
+            blankToken: model.blankTokenID,
+            config: config
+        )
+    }
 
     /// Ingest a chunk of 16 kHz mono samples; returns the text decoded by this call.
     @discardableResult
