@@ -95,12 +95,13 @@ jobs:
         run: |
           python - <<'PY'
           import json, subprocess, time
+          from huggingface_hub import snapshot_download
+          model = snapshot_download("LiquidAI/LFM3-Audio-2B-MLX-4bit", revision="${{ env.LFM3_MLX_REV }}")
           rows = [json.loads(l) for l in open("clips/manifest.jsonl")][:10]
           out = open("mlx-offline.jsonl", "w")
           for r in rows:
               t0 = time.time()
-              p = subprocess.run(["python", "-m", "mlx_vlm.generate", "--model", "LiquidAI/LFM3-Audio-2B-MLX-4bit",
-                                  "--revision", "${{ env.LFM3_MLX_REV }}",
+              p = subprocess.run(["python", "-m", "mlx_vlm.generate", "--model", model,
                                   "--system", "Perform ASR in English.", "--prompt", "", "--audio", "clips/" + r["file"],
                                   "--temperature", "0", "--max-tokens", "512"], capture_output=True, text=True)
               print(r["id"], r["seconds"], "s audio,", round(time.time() - t0, 1), "s wall, rc", p.returncode, flush=True)
