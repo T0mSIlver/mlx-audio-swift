@@ -48,12 +48,14 @@ final class NemotronASRTermBooster {
     private let prefixes: Set<String>
     /// Matches under way: term prefixes the emitted text currently ends with.
     private var active: [String] = []
-    /// Returns nil when no term survives normalization.
+    /// Returns nil when no term survives normalization. `atWordBoundary` is true at
+    /// the start of a transcript, where a piece with no leading "▁" still starts a word.
     init?(
         terms: [String],
         vocabulary: [String],
         blankToken: Int,
-        config: NemotronASRTermBoostConfig
+        config: NemotronASRTermBoostConfig,
+        atWordBoundary: Bool = true
     ) {
         var prefixes = Set<String>()
         for term in terms {
@@ -68,6 +70,7 @@ final class NemotronASRTermBooster {
         }
         guard !prefixes.isEmpty else { return nil }
         self.prefixes = prefixes
+        self.active = atWordBoundary ? [" "] : []
         self.config = config
         self.pieceText = vocabulary.indices.map { id in
             guard id != blankToken, !NemotronASRTokenizer.isSpecialToken(id, vocabulary: vocabulary) else {
