@@ -22,4 +22,5 @@ Start any of them from the Actions tab (`workflow_dispatch`). The pinned revisio
 Results so far:
 - At fp32 both ports give NeMo's tokens on every streaming clip-latency pair: Swift 527/527 ([run](https://github.com/T0mSIlver/mlx-audio-swift/actions/runs/41763554258)), Python 442/442.
 - Offline, Python matches NeMo's text on 82/83 clips. The one miss is an 8 kHz input, where the two resamplers feed the model different samples.
+- On all 25 of the model card's languages, with the language given and with `auto`, both ports at fp32 give NeMo's tokens on all 1,190 clip-latency pairs ([run](https://github.com/T0mSIlver/mlx-audio-swift/actions/runs/41811398966)).
 - In bf16, 89-96 % of clips stay token-identical at each latency, and FLEURS WER stays within 0.3 points of NeMo's.
