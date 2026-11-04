@@ -1,0 +1,204 @@
+# Verification only (not for merge): the model card's claims in both ports against NeMo,
+# on FLEURS in all 25 languages with the explicit and the `auto` prompt.
+name: Verify Nemotron Unified card
+
+on:
+  push:
+    branches:
+      - 'verify/nemotron-unified*'
+    paths:
+      - '.github/workflows/verify-nemotron-unified-card.yml'
+  workflow_dispatch:
+    inputs:
+      only:
+        description: 'Comma list of jobs to run (nemo,py,swift); empty runs all'
+        default: ''
+
+env:
+  NEMO_REV: 023ce907267a09a308a5cb69239447cb3d0c1597
+  NEMO_SPEECH_SHA: 0c7af3351eb73ec7ad566f770623023e71187c92
+  MLX_AUDIO_SHA: 47bd8e7f695af53f8176f8734eebb314122e891d
+  Q8_REPO: T0mSIlver/nemotron-labs-unified-asr-0.6b-8bit
+  Q8_REV: b7108f135cd732fbdf86af5fa7bc8a30f38cb069
+  PY: '3.12'
+
+jobs:
+  prefetch:
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    steps:
+      - uses: actions/setup-python@v5
+        with: { python-version: '${{ env.PY }}' }
+      - id: ckpt
+        uses: actions/cache@v4
+        with: { path: ckpt, key: 'nemo-unified-${{ env.NEMO_REV }}', enableCrossOsArchive: true }
+      - if: steps.ckpt.outputs.cache-hit != 'true'
+        run: |
+          pip install -q huggingface_hub
+          python -c "from huggingface_hub import hf_hub_download as d; d('nvidia/nemotron-labs-unified-asr-0.6b', 'nemotron-labs-unified-asr-0.6b.nemo', revision='$NEMO_REV', local_dir='ckpt')"
+      - id: q8
+        uses: actions/cache@v4
+        with: { path: q8, key: 'unified-8bit-${{ env.Q8_REV }}', enableCrossOsArchive: true }
+      - if: steps.q8.outputs.cache-hit != 'true'
+        run: |
+          pip install -q huggingface_hub
+          python -c "from huggingface_hub import snapshot_download as s; s('$Q8_REPO', revision='$Q8_REV', local_dir='q8')"
+          rm -rf q8/.cache; ls -la q8
+      - id: venv
+        uses: actions/cache@v4
+        with: { path: nemo-venv, key: 'nemo-site-${{ runner.os }}-${{ env.PY }}-${{ env.NEMO_SPEECH_SHA }}' }
+      - if: steps.venv.outputs.cache-hit != 'true'
+        run: |
+          pip install -q --target nemo-venv torch torchaudio --index-url https://download.pytorch.org/whl/cpu
+          pip install -q --target nemo-venv "nemo-toolkit[asr] @ git+https://github.com/NVIDIA-NeMo/Speech.git@${NEMO_SPEECH_SHA}"
+
+  clips:
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: { python-version: '${{ env.PY }}' }
+      - run: pip install -q huggingface_hub soundfile scipy numpy
+      - run: python verify/nemotron_unified/card_clips.py clips --per-lang 5
+      - uses: actions/upload-artifact@v4
+        with: { name: card-clips, path: clips, retention-days: 7 }
+
+  nemo:
+    if: inputs.only == '' || inputs.only == null || contains(format(',{0},', inputs.only), ',nemo,')
+    needs: [prefetch, clips]
+    runs-on: ubuntu-latest
+    timeout-minutes: 300
+    strategy:
+      fail-fast: false
+      max-parallel: 20
+      matrix:
+        part: [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: { python-version: '${{ env.PY }}' }
+      - uses: actions/cache/restore@v4
+        with: { path: ckpt, key: 'nemo-unified-${{ env.NEMO_REV }}', enableCrossOsArchive: true, fail-on-cache-miss: true }
+      - uses: actions/cache/restore@v4
+        with: { path: nemo-venv, key: 'nemo-site-${{ runner.os }}-${{ env.PY }}-${{ env.NEMO_SPEECH_SHA }}', fail-on-cache-miss: true }
+      - uses: actions/download-artifact@v4
+        with: { name: card-clips, path: clips }
+      - run: >-
+          PYTHONPATH=nemo-venv python verify/nemotron_unified/nemo_ref.py ckpt/nemotron-labs-unified-asr-0.6b.nemo
+          clips/manifest.jsonl nemo-${{ matrix.part }}.jsonl --shard ${{ matrix.part }}/20
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with: { name: 'card-nemo-${{ matrix.part }}', path: 'nemo-${{ matrix.part }}.jsonl', retention-days: 7 }
+
+  py:
+    if: inputs.only == '' || inputs.only == null || contains(format(',{0},', inputs.only), ',py,')
+    needs: [prefetch, clips]
+    runs-on: macos-15
+    timeout-minutes: 340
+    strategy:
+      fail-fast: false
+      matrix:
+        part: [0, 1, 2]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: { python-version: '${{ env.PY }}' }
+      - uses: actions/cache/restore@v4
+        with: { path: ckpt, key: 'nemo-unified-${{ env.NEMO_REV }}', enableCrossOsArchive: true, fail-on-cache-miss: true }
+      - uses: actions/download-artifact@v4
+        with: { name: card-clips, path: clips }
+      - name: Install the Python port
+        run: |
+          python -m venv py
+          py/bin/pip install -q torch pyyaml pytest "mlx-audio @ git+https://github.com/T0mSIlver/mlx-audio.git@${MLX_AUDIO_SHA}"
+      - name: Prompt language table (offered test)
+        if: matrix.part == 0
+        run: py/bin/python -m pytest -q verify/nemotron_unified/offer/test_nemotron_unified_prompt_language.py
+      - name: Convert (fp32)
+        run: py/bin/python -m mlx_audio.stt.models.nemotron_asr.convert --nemo-path ckpt/nemotron-labs-unified-asr-0.6b.nemo --mlx-path model --dtype float32
+      - name: Shard the manifest
+        run: python -c "import sys; l=open('clips/manifest.jsonl').readlines(); open('clips/shard.jsonl','w').writelines(l[${{ matrix.part }}::3])"
+      - name: Python port
+        run: py/bin/python verify/nemotron_unified/mlx_run.py model fp32 clips/shard.jsonl py-fp32-${{ matrix.part }}.jsonl --no-session
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with: { name: 'card-py-fp32-${{ matrix.part }}', path: 'py-fp32-${{ matrix.part }}.jsonl', retention-days: 7 }
+
+  swift:
+    if: inputs.only == '' || inputs.only == null || contains(format(',{0},', inputs.only), ',swift,')
+    needs: [prefetch, clips]
+    runs-on: macos-latest
+    timeout-minutes: 340
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { quant: fp32, part: 0, parts: 3 }
+          - { quant: fp32, part: 1, parts: 3 }
+          - { quant: fp32, part: 2, parts: 3 }
+          - { quant: 8bit-fp16, part: 0, parts: 2 }
+          - { quant: 8bit-fp16, part: 1, parts: 2 }
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: { python-version: '${{ env.PY }}' }
+      - uses: actions/download-artifact@v4
+        with: { name: card-clips, path: clips }
+      - name: Model (fp32 converted from the .nemo; 8-bit is the published b7108f13)
+        run: |
+          if [ "${{ matrix.quant }}" = fp32 ]; then
+            echo "key=nemo-unified-${NEMO_REV}" >> "$GITHUB_ENV"; echo "cpath=ckpt" >> "$GITHUB_ENV"
+          else
+            echo "key=unified-8bit-${Q8_REV}" >> "$GITHUB_ENV"; echo "cpath=q8" >> "$GITHUB_ENV"
+          fi
+      - uses: actions/cache/restore@v4
+        with: { path: '${{ env.cpath }}', key: '${{ env.key }}', enableCrossOsArchive: true, fail-on-cache-miss: true }
+      - if: matrix.quant == 'fp32'
+        run: |
+          python -m venv py
+          py/bin/pip install -q torch pyyaml "mlx-audio @ git+https://github.com/T0mSIlver/mlx-audio.git@${MLX_AUDIO_SHA}"
+          py/bin/python -m mlx_audio.stt.models.nemotron_asr.convert --nemo-path ckpt/nemotron-labs-unified-asr-0.6b.nemo --mlx-path model --dtype float32
+      - if: matrix.quant != 'fp32'
+        run: mv q8 model && ls -la model && shasum -a 256 model/model.safetensors
+      - name: Shard the manifest
+        run: python -c "l=open('clips/manifest.jsonl').readlines(); open('clips/shard.jsonl','w').writelines(l[${{ matrix.part }}::${{ matrix.parts }}])"
+      - name: Select Xcode version
+        uses: maxim-lobanov/setup-xcode@v1
+        with: { xcode-version: latest }
+      - name: Install Metal toolchain
+        run: xcodebuild -downloadComponent MetalToolchain
+      - name: Build Swift
+        run: >-
+          xcodebuild build-for-testing -scheme MLXAudio-Package -destination 'platform=macOS'
+          -derivedDataPath "$RUNNER_TEMP/DerivedData" -clonedSourcePackagesDirPath "$RUNNER_TEMP/SourcePackages"
+          MACOSX_DEPLOYMENT_TARGET=14.0 CODE_SIGNING_ALLOWED=NO COMPILER_INDEX_STORE_ENABLE=NO -quiet
+      - name: Prompt language table (real checkpoint, and the offered unit test)
+        if: matrix.part == 0
+        shell: bash
+        env:
+          TEST_RUNNER_NEMOTRON_VERIFY_PROMPT_TABLE: ${{ github.workspace }}/verify/nemotron_unified/offer/nemotron_unified_prompt_languages.json
+          TEST_RUNNER_NEMOTRON_VERIFY_MODEL: ${{ github.workspace }}/model
+          TEST_RUNNER_MLXAUDIO_ENABLE_MLX_RUNTIME_TESTS: '1'
+        run: >-
+          xcodebuild test-without-building -scheme MLXAudio-Package -destination 'platform=macOS'
+          -derivedDataPath "$RUNNER_TEMP/DerivedData" -clonedSourcePackagesDirPath "$RUNNER_TEMP/SourcePackages"
+          -only-testing:'MLXAudioTests/NemotronUnifiedVerifyTests' -only-testing:'MLXAudioTests/NemotronASRTests'
+          MACOSX_DEPLOYMENT_TARGET=14.0 CODE_SIGNING_ALLOWED=NO COMPILER_INDEX_STORE_ENABLE=NO
+          | tee table-test.log; grep "prompt table:" table-test.log; ! grep -q -e "Skipping Nemotron ASR MLX runtime" -e "Skipping Nemotron Unified prompt table" table-test.log
+      - name: Swift port
+        shell: bash
+        env:
+          TEST_RUNNER_NEMOTRON_VERIFY_MANIFEST: ${{ github.workspace }}/clips/shard.jsonl
+          TEST_RUNNER_NEMOTRON_VERIFY_MODEL: ${{ github.workspace }}/model
+          TEST_RUNNER_NEMOTRON_VERIFY_OUT: ${{ github.workspace }}/swift-${{ matrix.quant }}-${{ matrix.part }}.jsonl
+          TEST_RUNNER_NEMOTRON_VERIFY_LABEL: ${{ matrix.quant }}
+        run: >-
+          xcodebuild test-without-building -scheme MLXAudio-Package -destination 'platform=macOS'
+          -derivedDataPath "$RUNNER_TEMP/DerivedData" -clonedSourcePackagesDirPath "$RUNNER_TEMP/SourcePackages"
+          -only-testing:'MLXAudioTests/NemotronUnifiedVerifyTests'
+          MACOSX_DEPLOYMENT_TARGET=14.0 CODE_SIGNING_ALLOWED=NO COMPILER_INDEX_STORE_ENABLE=NO
+          | tee swift-test.log; test -s "$TEST_RUNNER_NEMOTRON_VERIFY_OUT"; ! grep -q "Skipping Nemotron Unified verification" swift-test.log
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with: { name: 'card-swift-${{ matrix.quant }}-${{ matrix.part }}', path: 'swift-${{ matrix.quant }}-${{ matrix.part }}.jsonl', retention-days: 7 }
