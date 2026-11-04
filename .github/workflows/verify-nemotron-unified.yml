@@ -10,7 +10,7 @@ on:
 env:
   NEMO_REV: 023ce907267a09a308a5cb69239447cb3d0c1597
   NEMO_SPEECH_SHA: 0c7af3351eb73ec7ad566f770623023e71187c92
-  MLX_AUDIO_SHA: 6dc739eaf9e3b76ee38947bc0d187190161759ca
+  MLX_AUDIO_SHA: f503fd66b4f2986d0e751270f5942d4cd442e0d9
   PY: '3.12'
 
 jobs:
@@ -35,13 +35,12 @@ jobs:
         uses: actions/cache@v4
         with:
           path: nemo-venv
-          key: nemo-venv-${{ runner.os }}-${{ env.PY }}-${{ env.NEMO_SPEECH_SHA }}
+          key: nemo-site-${{ runner.os }}-${{ env.PY }}-${{ env.NEMO_SPEECH_SHA }}
       - if: steps.venv.outputs.cache-hit != 'true'
         run: |
-          python -m venv nemo-venv
-          nemo-venv/bin/pip install -q torch torchaudio --index-url https://download.pytorch.org/whl/cpu
-          nemo-venv/bin/pip install -q "nemo-toolkit[asr] @ git+https://github.com/NVIDIA-NeMo/Speech.git@${NEMO_SPEECH_SHA}"
-          nemo-venv/bin/python -c "import nemo, torch; print(nemo.__version__, torch.__version__)"
+          pip install -q --target nemo-venv torch torchaudio --index-url https://download.pytorch.org/whl/cpu
+          pip install -q --target nemo-venv "nemo-toolkit[asr] @ git+https://github.com/NVIDIA-NeMo/Speech.git@${NEMO_SPEECH_SHA}"
+          PYTHONPATH=nemo-venv python -c "import nemo, torch; print(nemo.__version__, torch.__version__)"
 
   clips:
     runs-on: ubuntu-latest
@@ -62,7 +61,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        part: [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15]
+        part: [0, 1, 2, 3, 4, 5, 6, 7, 8, 9]
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -70,12 +69,12 @@ jobs:
       - uses: actions/cache/restore@v4
         with: { path: ckpt, key: 'nemo-unified-${{ env.NEMO_REV }}', enableCrossOsArchive: true, fail-on-cache-miss: true }
       - uses: actions/cache/restore@v4
-        with: { path: nemo-venv, key: 'nemo-venv-${{ runner.os }}-${{ env.PY }}-${{ env.NEMO_SPEECH_SHA }}', fail-on-cache-miss: true }
+        with: { path: nemo-venv, key: 'nemo-site-${{ runner.os }}-${{ env.PY }}-${{ env.NEMO_SPEECH_SHA }}', fail-on-cache-miss: true }
       - uses: actions/download-artifact@v4
         with: { name: clips, path: clips }
       - run: >-
-          nemo-venv/bin/python verify/nemotron_unified/nemo_ref.py ckpt/nemotron-labs-unified-asr-0.6b.nemo
-          clips/manifest.jsonl nemo-${{ matrix.part }}.jsonl --shard ${{ matrix.part }}/16
+          PYTHONPATH=nemo-venv python verify/nemotron_unified/nemo_ref.py ckpt/nemotron-labs-unified-asr-0.6b.nemo
+          clips/manifest.jsonl nemo-${{ matrix.part }}.jsonl --shard ${{ matrix.part }}/10
           --kinds fleurs,silence,noise,music,clipped,padded,tiny,command,samplerate,stereo
       - uses: actions/upload-artifact@v4
         if: always()
@@ -102,11 +101,11 @@ jobs:
       - uses: actions/cache/restore@v4
         with: { path: ckpt, key: 'nemo-unified-${{ env.NEMO_REV }}', enableCrossOsArchive: true, fail-on-cache-miss: true }
       - uses: actions/cache/restore@v4
-        with: { path: nemo-venv, key: 'nemo-venv-${{ runner.os }}-${{ env.PY }}-${{ env.NEMO_SPEECH_SHA }}', fail-on-cache-miss: true }
+        with: { path: nemo-venv, key: 'nemo-site-${{ runner.os }}-${{ env.PY }}-${{ env.NEMO_SPEECH_SHA }}', fail-on-cache-miss: true }
       - uses: actions/download-artifact@v4
         with: { name: clips, path: clips }
       - run: >-
-          nemo-venv/bin/python verify/nemotron_unified/nemo_ref.py ckpt/nemotron-labs-unified-asr-0.6b.nemo
+          PYTHONPATH=nemo-venv python verify/nemotron_unified/nemo_ref.py ckpt/nemotron-labs-unified-asr-0.6b.nemo
           clips/manifest.jsonl out.jsonl --ids ${{ matrix.job.ids }} --latencies ${{ matrix.job.lat }}
       - uses: actions/upload-artifact@v4
         if: always()
@@ -200,3 +199,26 @@ jobs:
       - uses: actions/upload-artifact@v4
         if: always()
         with: { name: 'swift-${{ matrix.quant.label }}', path: 'swift-${{ matrix.quant.label }}.jsonl', retention-days: 5 }
+
+  profile:
+    needs: [prefetch]
+    runs-on: macos-15
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: { python-version: '${{ env.PY }}' }
+      - uses: actions/cache/restore@v4
+        with: { path: ckpt, key: 'nemo-unified-${{ env.NEMO_REV }}', enableCrossOsArchive: true, fail-on-cache-miss: true }
+      - run: |
+          python -m venv py
+          py/bin/pip install -q torch pyyaml "mlx-audio @ git+https://github.com/T0mSIlver/mlx-audio.git@${MLX_AUDIO_SHA}"
+          sysctl -n machdep.cpu.brand_string; system_profiler SPDisplaysDataType | grep -i -E "chipset|cores" || true
+      - run: |
+          for q in "bf16:--dtype bfloat16" "8bit:--dtype bfloat16 -q --q-bits 8 --q-group-size 64" "4bit:--dtype bfloat16 -q --q-bits 4 --q-group-size 64"; do
+            py/bin/python -m mlx_audio.stt.models.nemotron_asr.convert --nemo-path ckpt/nemotron-labs-unified-asr-0.6b.nemo --mlx-path "m-${q%%:*}" ${q#*:}
+          done
+      - run: py/bin/python verify/nemotron_unified/profile_step.py m-bf16 m-8bit m-4bit | tee profile.jsonl
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with: { name: profile, path: profile.jsonl, retention-days: 5 }
