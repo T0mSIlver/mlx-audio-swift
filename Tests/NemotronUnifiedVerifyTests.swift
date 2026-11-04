@@ -33,7 +33,10 @@ struct NemotronUnifiedVerifyTests {
         let push = Int(env["NEMOTRON_VERIFY_PUSH"] ?? "") ?? 1280
 
         let loadStart = Date()
-        let model = try NemotronASRModel.fromDirectory(URL(fileURLWithPath: modelDir))
+        // fp32 runs fp32 compute; everything else the default bf16.
+        let model = try NemotronASRModel.fromDirectory(
+            URL(fileURLWithPath: modelDir), computeDType: label == "fp32" ? .float32 : .bfloat16
+        )
         print("load \(Date().timeIntervalSince(loadStart))s")
         let manifestURL = URL(fileURLWithPath: manifestPath)
         let root = manifestURL.deletingLastPathComponent()

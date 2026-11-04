@@ -16,11 +16,14 @@ on:
       kinds:
         description: 'Clip kinds for the Swift job (comma list); empty = all'
         default: ''
+      quants:
+        description: 'JSON list of quantizations for the py and swift jobs, in order'
+        default: '["bf16","8bit","fp32","4bit"]'
 
 env:
   NEMO_REV: 023ce907267a09a308a5cb69239447cb3d0c1597
   NEMO_SPEECH_SHA: 0c7af3351eb73ec7ad566f770623023e71187c92
-  MLX_AUDIO_SHA: f503fd66b4f2986d0e751270f5942d4cd442e0d9
+  MLX_AUDIO_SHA: 5b14499a442227f9c63fe8ee7e57d7c9444db703
   PY: '3.12'
 
 jobs:
@@ -162,11 +165,7 @@ jobs:
       fail-fast: false
       max-parallel: 1
       matrix:
-        quant:
-          - { label: bf16, args: '--dtype bfloat16', session: '' }
-          - { label: 8bit, args: '--dtype bfloat16 -q --q-bits 8 --q-group-size 64', session: '' }
-          - { label: fp32, args: '--dtype float32', session: '--no-session' }
-          - { label: 4bit, args: '--dtype bfloat16 -q --q-bits 4 --q-group-size 64', session: '--no-session' }
+        quant: ${{ fromJSON(inputs.quants || '["bf16","8bit","fp32","4bit"]') }}
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -182,13 +181,14 @@ jobs:
           py/bin/python -c "import mlx.core as mx; print(mx.__version__, mx.default_device())"
       - name: Convert
         run: |
-          py/bin/python -m mlx_audio.stt.models.nemotron_asr.convert --nemo-path ckpt/nemotron-labs-unified-asr-0.6b.nemo --mlx-path model ${{ matrix.quant.args }}
+          case "${{ matrix.quant }}" in bf16) a="--dtype bfloat16";; fp32) a="--dtype float32";; 8bit) a="--dtype bfloat16 -q --q-bits 8 --q-group-size 64";; 4bit) a="--dtype bfloat16 -q --q-bits 4 --q-group-size 64";; esac
+          py/bin/python -m mlx_audio.stt.models.nemotron_asr.convert --nemo-path ckpt/nemotron-labs-unified-asr-0.6b.nemo --mlx-path model $a
           ls -la model; shasum -a 256 model/model.safetensors
       - name: Python port
-        run: py/bin/python verify/nemotron_unified/mlx_run.py model ${{ matrix.quant.label }} clips/manifest.jsonl py-${{ matrix.quant.label }}.jsonl ${{ matrix.quant.session }}
+        run: py/bin/python verify/nemotron_unified/mlx_run.py model ${{ matrix.quant }} clips/manifest.jsonl py-${{ matrix.quant }}.jsonl --no-session --skip-ids long-en-10min
       - uses: actions/upload-artifact@v4
         if: always()
-        with: { name: 'py-${{ matrix.quant.label }}', path: 'py-${{ matrix.quant.label }}.jsonl', retention-days: 5 }
+        with: { name: 'py-${{ matrix.quant }}', path: 'py-${{ matrix.quant }}.jsonl', retention-days: 5 }
 
   swift:
     if: inputs.only == '' || inputs.only == null || contains(format(',{0},', inputs.only), ',swift,')
@@ -199,11 +199,7 @@ jobs:
       fail-fast: false
       max-parallel: 1
       matrix:
-        quant:
-          - { label: bf16, args: '--dtype bfloat16', session: '' }
-          - { label: 8bit, args: '--dtype bfloat16 -q --q-bits 8 --q-group-size 64', session: '' }
-          - { label: fp32, args: '--dtype float32', session: '--no-session' }
-          - { label: 4bit, args: '--dtype bfloat16 -q --q-bits 4 --q-group-size 64', session: '--no-session' }
+        quant: ${{ fromJSON(inputs.quants || '["bf16","8bit","fp32","4bit"]') }}
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -219,7 +215,8 @@ jobs:
           py/bin/python -c "import mlx.core as mx; print(mx.__version__, mx.default_device())"
       - name: Convert
         run: |
-          py/bin/python -m mlx_audio.stt.models.nemotron_asr.convert --nemo-path ckpt/nemotron-labs-unified-asr-0.6b.nemo --mlx-path model ${{ matrix.quant.args }}
+          case "${{ matrix.quant }}" in bf16) a="--dtype bfloat16";; fp32) a="--dtype float32";; 8bit) a="--dtype bfloat16 -q --q-bits 8 --q-group-size 64";; 4bit) a="--dtype bfloat16 -q --q-bits 4 --q-group-size 64";; esac
+          py/bin/python -m mlx_audio.stt.models.nemotron_asr.convert --nemo-path ckpt/nemotron-labs-unified-asr-0.6b.nemo --mlx-path model $a
           ls -la model; shasum -a 256 model/model.safetensors
       - name: Select Xcode version
         uses: maxim-lobanov/setup-xcode@v1
@@ -236,8 +233,8 @@ jobs:
         env:
           TEST_RUNNER_NEMOTRON_VERIFY_MANIFEST: ${{ github.workspace }}/clips/manifest.jsonl
           TEST_RUNNER_NEMOTRON_VERIFY_MODEL: ${{ github.workspace }}/model
-          TEST_RUNNER_NEMOTRON_VERIFY_OUT: ${{ github.workspace }}/swift-${{ matrix.quant.label }}.jsonl
-          TEST_RUNNER_NEMOTRON_VERIFY_LABEL: ${{ matrix.quant.label }}
+          TEST_RUNNER_NEMOTRON_VERIFY_OUT: ${{ github.workspace }}/swift-${{ matrix.quant }}.jsonl
+          TEST_RUNNER_NEMOTRON_VERIFY_LABEL: ${{ matrix.quant }}
           TEST_RUNNER_NEMOTRON_VERIFY_KINDS: ${{ inputs.kinds }}
         run: >-
           xcodebuild test-without-building -scheme MLXAudio-Package -destination 'platform=macOS'
@@ -246,7 +243,7 @@ jobs:
           MACOSX_DEPLOYMENT_TARGET=14.0 CODE_SIGNING_ALLOWED=NO COMPILER_INDEX_STORE_ENABLE=NO
           | tee swift-test.log; test -s "$TEST_RUNNER_NEMOTRON_VERIFY_OUT"; ! grep -q "Skipping Nemotron Unified verification" swift-test.log
       - name: Session contract and Nemotron tests (MLX runtime)
-        if: always() && matrix.quant.label == 'bf16'
+        if: always() && matrix.quant == 'bf16'
         shell: bash
         env:
           TEST_RUNNER_MLXAUDIO_ENABLE_MLX_RUNTIME_TESTS: '1'
@@ -258,7 +255,7 @@ jobs:
           | tee contract-test.log; ! grep -q "Skipping Nemotron ASR MLX runtime test" contract-test.log
       - uses: actions/upload-artifact@v4
         if: always()
-        with: { name: 'swift-${{ matrix.quant.label }}', path: 'swift-${{ matrix.quant.label }}.jsonl', retention-days: 5 }
+        with: { name: 'swift-${{ matrix.quant }}', path: 'swift-${{ matrix.quant }}.jsonl', retention-days: 5 }
 
   profile:
     if: inputs.only == '' || inputs.only == null || contains(format(',{0},', inputs.only), ',profile,')

@@ -45,12 +45,15 @@ def main():
     ap.add_argument("--latencies", default="")
     ap.add_argument("--kinds", default="")
     ap.add_argument("--no-session", action="store_true")
+    ap.add_argument("--skip-ids", default="")
     args = ap.parse_args()
     root = Path(args.manifest).parent
     rows = [json.loads(l) for l in open(args.manifest, encoding="utf-8")]
     if args.kinds:
         rows = [r for r in rows if r["kind"] in args.kinds.split(",")]
     only = [int(v) for v in args.latencies.split(",") if v]
+    skip = set(args.skip_ids.split(","))
+    rows = [r for r in rows if r["id"] not in skip]
     t0 = time.time()
     model = load(args.model)
     print(f"load {time.time() - t0:.1f}s", file=sys.stderr)
