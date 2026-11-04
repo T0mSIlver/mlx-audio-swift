@@ -3868,6 +3868,20 @@ struct VoxtralRealtimeSTTTests {
         #expect(booster.choose(greedy: 1008, logits: logits([1008: 0, 1011: -3])) == 1011)
     }
 
+    @Test func termBoostContinuesOnlyWithAWordStartAfterAWordBoundary() throws {
+        let booster = try #require(makeVoxtralBooster(["mlx-audio"]))
+        booster.accept(1009)  // " ml"
+        booster.accept(1010)  // "x"
+        booster.accept(33)
+        // "-" continues the written variant "mlx-audio" only inside the word.
+        #expect(booster.choose(greedy: 1008, logits: logits([1008: 0, 1012: -3])) == 1008)
+        booster.accept(32)    // padding keeps the boundary
+        #expect(booster.choose(greedy: 1008, logits: logits([1008: 0, 1012: -3])) == 1008)
+        #expect(booster.choose(greedy: 1008, logits: logits([1008: 0, 1011: -3])) == 1011)
+        booster.accept(1012)  // a "-" emitted anyway ends the match
+        #expect(booster.choose(greedy: 1007, logits: logits([1007: 0, 1013: -3])) == 1007)
+    }
+
     @Test func termBoostIgnoresNegativeBonuses() throws {
         let booster = try #require(makeVoxtralBooster(["Claude Code"], config: .init(firstTokenBoost: -1)))
         // " Cl" starts the term; " the" does not and must not win from it.
