@@ -187,7 +187,14 @@ public final class NemotronASRStreamSession {
                     Int((Double($0) * frameMs).rounded()), left: model.defaultBufferedContext.left
                 )
             } ?? model.defaultBufferedContext
-            self.buffered = NemotronASRBufferedEncoder(model: model, context: context, language: language)
+            // BENCH ONLY: MLXAUDIO_NEMOTRON_CONTEXT=left-chunk-right (encoder frames).
+            var benchContext = context
+            if let raw = ProcessInfo.processInfo.environment["MLXAUDIO_NEMOTRON_CONTEXT"] {
+                let v = raw.split(separator: "-").compactMap { Int($0) }
+                if v.count == 3 { benchContext = NemotronASRBufferedContext(left: v[0], chunk: v[1], right: v[2]) }
+            }
+            FileHandle.standardError.write(Data("NEMOTRON_CONTEXT \(benchContext.asArray)\n".utf8))
+            self.buffered = NemotronASRBufferedEncoder(model: model, context: benchContext, language: language)
             return
         }
         self.buffered = nil
