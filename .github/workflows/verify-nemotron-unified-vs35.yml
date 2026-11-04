@@ -1,0 +1,57 @@
+# Verification only (not for merge): Nemotron Unified against Nemotron 3.5 in the Python port,
+# both 8-bit, same macOS runner, same 50 FLEURS clips and 2-minute monologue.
+name: Verify Nemotron Unified vs 3.5
+
+on:
+  push:
+    branches:
+      - 'verify/nemotron-unified*'
+    paths:
+      - '.github/workflows/verify-nemotron-unified-vs35.yml'
+  workflow_dispatch:
+
+env:
+  MLX_AUDIO_SHA: 47bd8e7f695af53f8176f8734eebb314122e891d
+  Q8_REPO: T0mSIlver/nemotron-labs-unified-asr-0.6b-8bit
+  Q8_REV: b7108f135cd732fbdf86af5fa7bc8a30f38cb069
+  R35_REPO: mlx-community/nemotron-3.5-asr-streaming-0.6b-8bit
+  PY: '3.12'
+
+jobs:
+  clips:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: { python-version: '${{ env.PY }}' }
+      - run: pip install -q huggingface_hub soundfile scipy numpy
+      - run: python verify/nemotron_unified/make_clips.py clips --per-lang 5 --long-minutes 2
+      - uses: actions/upload-artifact@v4
+        with: { name: clips-vs35, path: clips, retention-days: 5 }
+
+  vs35:
+    needs: clips
+    runs-on: macos-15
+    timeout-minutes: 300
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: { python-version: '${{ env.PY }}' }
+      - uses: actions/download-artifact@v4
+        with: { name: clips-vs35, path: clips }
+      - name: Install the Python port
+        run: |
+          python -m venv py
+          py/bin/pip install -q torch pyyaml "mlx-audio @ git+https://github.com/T0mSIlver/mlx-audio.git@${MLX_AUDIO_SHA}" huggingface_hub
+          py/bin/python -c "import mlx.core as mx; print(mx.__version__, mx.default_device())"
+          sysctl -n machdep.cpu.brand_string hw.memsize
+      - name: Download both 8-bit checkpoints
+        run: |
+          py/bin/python -c "from huggingface_hub import snapshot_download as d; print(d('$Q8_REPO', revision='$Q8_REV', local_dir='unified')); print(d('$R35_REPO', local_dir='r35'))"
+          py/bin/python -c "from huggingface_hub import HfApi; print('3.5 revision', HfApi().model_info('$R35_REPO').sha)"
+      - name: Unified vs 3.5
+        run: py/bin/python verify/nemotron_unified/vs35.py clips/manifest.jsonl vs35.json unified-8bit=unified nemotron35-8bit=r35
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with: { name: vs35, path: vs35.json, retention-days: 30 }
