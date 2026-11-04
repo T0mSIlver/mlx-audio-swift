@@ -215,7 +215,7 @@ jobs:
           py/bin/python -c "import mlx.core as mx; print(mx.__version__, mx.default_device())"
       - name: Convert
         run: |
-          case "${{ matrix.quant }}" in bf16) a="--dtype bfloat16";; fp32) a="--dtype float32";; 8bit) a="--dtype bfloat16 -q --q-bits 8 --q-group-size 64";; 4bit) a="--dtype bfloat16 -q --q-bits 4 --q-group-size 64";; esac
+          case "${{ matrix.quant }}" in bf16*) a="--dtype bfloat16";; fp32) a="--dtype float32";; 8bit*) a="--dtype bfloat16 -q --q-bits 8 --q-group-size 64";; 4bit*) a="--dtype bfloat16 -q --q-bits 4 --q-group-size 64";; esac; [ -n "$a" ] || { echo "unknown quant ${{ matrix.quant }}"; exit 1; }
           py/bin/python -m mlx_audio.stt.models.nemotron_asr.convert --nemo-path ckpt/nemotron-labs-unified-asr-0.6b.nemo --mlx-path model $a
           ls -la model; shasum -a 256 model/model.safetensors
       - name: Python port
@@ -249,7 +249,7 @@ jobs:
           py/bin/python -c "import mlx.core as mx; print(mx.__version__, mx.default_device())"
       - name: Convert
         run: |
-          case "${{ matrix.quant }}" in bf16) a="--dtype bfloat16";; fp32) a="--dtype float32";; 8bit) a="--dtype bfloat16 -q --q-bits 8 --q-group-size 64";; 4bit) a="--dtype bfloat16 -q --q-bits 4 --q-group-size 64";; esac
+          case "${{ matrix.quant }}" in bf16*) a="--dtype bfloat16";; fp32) a="--dtype float32";; 8bit*) a="--dtype bfloat16 -q --q-bits 8 --q-group-size 64";; 4bit*) a="--dtype bfloat16 -q --q-bits 4 --q-group-size 64";; esac; [ -n "$a" ] || { echo "unknown quant ${{ matrix.quant }}"; exit 1; }
           py/bin/python -m mlx_audio.stt.models.nemotron_asr.convert --nemo-path ckpt/nemotron-labs-unified-asr-0.6b.nemo --mlx-path model $a
           ls -la model; shasum -a 256 model/model.safetensors
       - name: Select Xcode version
@@ -270,6 +270,7 @@ jobs:
           TEST_RUNNER_NEMOTRON_VERIFY_OUT: ${{ github.workspace }}/swift-${{ matrix.quant }}.jsonl
           TEST_RUNNER_NEMOTRON_VERIFY_LABEL: ${{ matrix.quant }}
           TEST_RUNNER_NEMOTRON_VERIFY_KINDS: ${{ inputs.kinds }}
+          TEST_RUNNER_NEMOTRON_VERIFY_CONTEXTS: ${{ inputs.contexts }}
         run: >-
           xcodebuild test-without-building -scheme MLXAudio-Package -destination 'platform=macOS'
           -derivedDataPath "$RUNNER_TEMP/DerivedData" -clonedSourcePackagesDirPath "$RUNNER_TEMP/SourcePackages"
