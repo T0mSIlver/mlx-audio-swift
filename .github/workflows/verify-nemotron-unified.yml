@@ -201,25 +201,29 @@ jobs:
           -derivedDataPath "$RUNNER_TEMP/DerivedData" -clonedSourcePackagesDirPath "$RUNNER_TEMP/SourcePackages"
           MACOSX_DEPLOYMENT_TARGET=14.0 CODE_SIGNING_ALLOWED=NO COMPILER_INDEX_STORE_ENABLE=NO -quiet
       - name: Swift port
+        shell: bash
         env:
-          NEMOTRON_VERIFY_MANIFEST: ${{ github.workspace }}/clips/manifest.jsonl
-          NEMOTRON_VERIFY_MODEL: ${{ github.workspace }}/model
-          NEMOTRON_VERIFY_OUT: ${{ github.workspace }}/swift-${{ matrix.quant.label }}.jsonl
-          NEMOTRON_VERIFY_LABEL: ${{ matrix.quant.label }}
+          TEST_RUNNER_NEMOTRON_VERIFY_MANIFEST: ${{ github.workspace }}/clips/manifest.jsonl
+          TEST_RUNNER_NEMOTRON_VERIFY_MODEL: ${{ github.workspace }}/model
+          TEST_RUNNER_NEMOTRON_VERIFY_OUT: ${{ github.workspace }}/swift-${{ matrix.quant.label }}.jsonl
+          TEST_RUNNER_NEMOTRON_VERIFY_LABEL: ${{ matrix.quant.label }}
         run: >-
           xcodebuild test-without-building -scheme MLXAudio-Package -destination 'platform=macOS'
           -derivedDataPath "$RUNNER_TEMP/DerivedData" -clonedSourcePackagesDirPath "$RUNNER_TEMP/SourcePackages"
           -only-testing:'MLXAudioTests/NemotronUnifiedVerifyTests'
           MACOSX_DEPLOYMENT_TARGET=14.0 CODE_SIGNING_ALLOWED=NO COMPILER_INDEX_STORE_ENABLE=NO
+          | tee swift-test.log; test -s "$TEST_RUNNER_NEMOTRON_VERIFY_OUT"; ! grep -q "Skipping Nemotron Unified verification" swift-test.log
       - name: Session contract and Nemotron tests (MLX runtime)
-        if: matrix.quant.label == 'bf16'
+        if: always() && matrix.quant.label == 'bf16'
+        shell: bash
         env:
-          MLXAUDIO_ENABLE_MLX_RUNTIME_TESTS: '1'
+          TEST_RUNNER_MLXAUDIO_ENABLE_MLX_RUNTIME_TESTS: '1'
         run: >-
           xcodebuild test-without-building -scheme MLXAudio-Package -destination 'platform=macOS'
           -derivedDataPath "$RUNNER_TEMP/DerivedData" -clonedSourcePackagesDirPath "$RUNNER_TEMP/SourcePackages"
           -only-testing:'MLXAudioTests/NemotronUnifiedSessionContractTests' -only-testing:'MLXAudioTests/NemotronASRTests'
           MACOSX_DEPLOYMENT_TARGET=14.0 CODE_SIGNING_ALLOWED=NO COMPILER_INDEX_STORE_ENABLE=NO
+          | tee contract-test.log; ! grep -q "Skipping Nemotron ASR MLX runtime test" contract-test.log
       - uses: actions/upload-artifact@v4
         if: always()
         with: { name: 'swift-${{ matrix.quant.label }}', path: 'swift-${{ matrix.quant.label }}.jsonl', retention-days: 5 }
