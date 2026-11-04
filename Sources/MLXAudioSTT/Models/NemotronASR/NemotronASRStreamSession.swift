@@ -33,6 +33,9 @@ final class NemotronASRStreamRNNTState {
     var lastToken: Int
     var decoderState: NemoLSTMState?
     var globalTime = 0  // absolute subsampled-frame index, for token timestamps
+    var booster: NemotronASRTermBooster?
+    /// Tokens the boost chose over the unbiased argmax, across every list.
+    var boostedTokenCount = 0
 
     // The prediction network output depends only on (lastToken, decoderState),
     // which change only on emission. Blank frames reuse it, along with the
@@ -114,7 +117,18 @@ extension NemotronASRModel {
                 spec = MLX.concatenated(picks, axis: 0).asType(.int32).asArray(Int32.self).map { Int($0) }
                 specStart = time
             }
-            let token = spec[time - specStart]
+            var token = spec[time - specStart]
+            if let booster = state.booster, token != blankTokenID {
+                // Only a frame that emits pays for its logits: the boost picks which
+                // piece is emitted, never whether one is, so blank frames skip it.
+                let greedy = token
+                let logits = joint.combine(joint.enc(frame), prediction.predProjected)
+                token = booster.choose(
+                    logits: logits.reshaped([-1]).asType(.float32).asArray(Float.self),
+                    greedy: greedy
+                )
+                if token != greedy { state.boostedTokenCount += 1 }
+            }
             let step = NemoDecodingLogic.rnntStep(
                 predictedToken: token,
                 blankToken: blankTokenID,
@@ -127,6 +141,7 @@ extension NemotronASRModel {
                 state.decoderState = prediction.proposedState
                 state.cachedPrediction = nil
                 spec = []
+                state.booster?.accept(token)
                 if !NemotronASRTokenizer.isSpecialToken(token, vocabulary: vocabulary) {
                     state.results.append(
                         NemoAlignedToken(
@@ -219,6 +234,20 @@ public final class NemotronASRStreamSession {
     public var tokens: [Int] { rnntState.results.map { $0.id } }
     /// Whether `finish()` has been called.
     public var isFinished: Bool { done }
+    /// Tokens the term boost chose over the unbiased argmax so far.
+    public var boostedTokenCount: Int { rnntState.boostedTokenCount }
+
+    /// Boost `terms` while decoding from here on; an empty list turns the boost
+    /// off. A later call replaces the list and drops any match under way, but
+    /// keeps the running `boostedTokenCount`.
+    public func setBoostTerms(_ terms: [String], config: NemotronASRTermBoostConfig = .init()) {
+        rnntState.booster = NemotronASRTermBooster(
+            terms: terms,
+            vocabulary: model.vocabulary,
+            blankToken: model.blankTokenID,
+            config: config
+        )
+    }
 
     /// Ingest a chunk of 16 kHz mono samples; returns the text decoded by this call.
     @discardableResult
