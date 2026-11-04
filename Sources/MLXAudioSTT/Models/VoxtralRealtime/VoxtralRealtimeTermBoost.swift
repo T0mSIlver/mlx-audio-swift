@@ -61,8 +61,6 @@ final class VoxtralRealtimeTermBooster {
     private let padToken: Int
     private let wordToken: Int
     private let firstTextToken: Int
-    /// Tokens the boost chose over the unbiased argmax.
-    private(set) var boostedTokenCount = 0
 
     /// Nil when no term yields a token.
     init?(
@@ -72,14 +70,12 @@ final class VoxtralRealtimeTermBooster {
         padToken: Int,
         wordToken: Int = VoxtralRealtimeTermBooster.streamingWordTokenId,
         firstTextToken: Int,
-        config: VoxtralRealtimeTermBoostConfig,
-        boostedTokenCount: Int = 0
+        config: VoxtralRealtimeTermBoostConfig
     ) {
         self.config = config
         self.padToken = padToken
         self.wordToken = wordToken
         self.firstTextToken = firstTextToken
-        self.boostedTokenCount = boostedTokenCount
         for term in terms {
             for text in Self.variants(term) {
                 var node = root
@@ -129,7 +125,6 @@ final class VoxtralRealtimeTermBooster {
                 bestScore = score
             }
         }
-        if best != greedy { boostedTokenCount += 1 }
         return best
     }
 

@@ -3820,7 +3820,6 @@ struct VoxtralRealtimeSTTTests {
         let booster = try #require(makeVoxtralBooster(["Claude Code"]))
         // " clo" leads " Cl" by 1.0; the first-token bonus (2.5) flips it.
         #expect(booster.choose(greedy: 1006, logits: logits([1006: 0, 1001: -1])) == 1001)
-        #expect(booster.boostedTokenCount == 1)
     }
 
     @Test func termBoostContinuesAMatchAcrossPadsAndAWordBoundary() throws {
