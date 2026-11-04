@@ -229,7 +229,9 @@ public final class NemotronASRStreamSession {
             terms: terms,
             vocabulary: model.vocabulary,
             blankToken: model.blankTokenID,
-            config: config
+            config: config,
+            // Mid-transcript, the last piece may end inside a word.
+            atWordBoundary: rnntState.results.isEmpty
         )
     }
 
