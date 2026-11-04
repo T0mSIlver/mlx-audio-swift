@@ -60,6 +60,7 @@ jobs:
     timeout-minutes: 300
     strategy:
       fail-fast: false
+      max-parallel: 8
       matrix:
         part: [0, 1, 2, 3, 4, 5, 6, 7, 8, 9]
     steps:
@@ -86,6 +87,7 @@ jobs:
     timeout-minutes: 340
     strategy:
       fail-fast: false
+      max-parallel: 4
       matrix:
         job:
           - { ids: long-en-2min, lat: '320' }
@@ -117,12 +119,13 @@ jobs:
     timeout-minutes: 340
     strategy:
       fail-fast: false
+      max-parallel: 1
       matrix:
         quant:
-          - { label: fp32, args: '--dtype float32' }
-          - { label: bf16, args: '--dtype bfloat16' }
-          - { label: 8bit, args: '--dtype bfloat16 -q --q-bits 8 --q-group-size 64' }
-          - { label: 4bit, args: '--dtype bfloat16 -q --q-bits 4 --q-group-size 64' }
+          - { label: bf16, args: '--dtype bfloat16', session: '' }
+          - { label: 8bit, args: '--dtype bfloat16 -q --q-bits 8 --q-group-size 64', session: '' }
+          - { label: fp32, args: '--dtype float32', session: '--no-session' }
+          - { label: 4bit, args: '--dtype bfloat16 -q --q-bits 4 --q-group-size 64', session: '--no-session' }
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -141,7 +144,7 @@ jobs:
           py/bin/python -m mlx_audio.stt.models.nemotron_asr.convert --nemo-path ckpt/nemotron-labs-unified-asr-0.6b.nemo --mlx-path model ${{ matrix.quant.args }}
           ls -la model; shasum -a 256 model/model.safetensors
       - name: Python port
-        run: py/bin/python verify/nemotron_unified/mlx_run.py model ${{ matrix.quant.label }} clips/manifest.jsonl py-${{ matrix.quant.label }}.jsonl
+        run: py/bin/python verify/nemotron_unified/mlx_run.py model ${{ matrix.quant.label }} clips/manifest.jsonl py-${{ matrix.quant.label }}.jsonl ${{ matrix.quant.session }}
       - uses: actions/upload-artifact@v4
         if: always()
         with: { name: 'py-${{ matrix.quant.label }}', path: 'py-${{ matrix.quant.label }}.jsonl', retention-days: 5 }
@@ -152,12 +155,13 @@ jobs:
     timeout-minutes: 340
     strategy:
       fail-fast: false
+      max-parallel: 1
       matrix:
         quant:
-          - { label: fp32, args: '--dtype float32' }
-          - { label: bf16, args: '--dtype bfloat16' }
-          - { label: 8bit, args: '--dtype bfloat16 -q --q-bits 8 --q-group-size 64' }
-          - { label: 4bit, args: '--dtype bfloat16 -q --q-bits 4 --q-group-size 64' }
+          - { label: bf16, args: '--dtype bfloat16', session: '' }
+          - { label: 8bit, args: '--dtype bfloat16 -q --q-bits 8 --q-group-size 64', session: '' }
+          - { label: fp32, args: '--dtype float32', session: '--no-session' }
+          - { label: 4bit, args: '--dtype bfloat16 -q --q-bits 4 --q-group-size 64', session: '--no-session' }
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
