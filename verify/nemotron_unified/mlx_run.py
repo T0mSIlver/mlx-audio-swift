@@ -16,7 +16,7 @@ from pathlib import Path
 import mlx.core as mx
 import numpy as np
 
-from mlx_audio.stt.models.nemotron_asr.buffered import DELAY_CONTEXTS
+from mlx_audio.stt.models.nemotron_asr.buffered import BufferedContext
 from mlx_audio.stt.utils import load, load_audio
 
 
@@ -64,6 +64,10 @@ def main():
             jobs = (["offline"] if r.get("offline") else []) + [
                 lat for lat in r["latencies"] if not only or lat in only
             ]
+            # Named [left, chunk, right] layouts from the manifest row, after the latencies.
+            ctxs = {lat: BufferedContext.from_delay_ms(lat).as_list() for lat in jobs if lat != "offline"}
+            ctxs.update(r.get("contexts", {}))
+            jobs += list(r.get("contexts", {}))
             for lat in jobs:
                 rec = {"id": r["id"], "latency": lat, "impl": f"py-{args.label}", "error": None}
                 t1 = time.time()
@@ -72,14 +76,13 @@ def main():
                         res = model.generate(audio, language=r["lang"])
                         rec["tokens"], rec["text"] = result_tokens(res), res.text
                     else:
-                        c, rc = DELAY_CONTEXTS[lat]
                         res = None
-                        for res in model.stream_generate(audio, language=r["lang"], att_context_size=[70, c, rc]):
+                        for res in model.stream_generate(audio, language=r["lang"], att_context_size=ctxs[lat]):
                             pass
                         rec["tokens"] = result_tokens(res) if res else []
                         rec["text"] = res.text if res else ""
                         rec["stream_seconds"] = round(time.time() - t1, 2)
-                        if not args.no_session:
+                        if not args.no_session and isinstance(lat, int):
                             rec["session_text"] = session_text(model, samples, r["lang"], lat).strip()
                 except Exception as e:
                     rec["error"] = f"{type(e).__name__}: {e}"[:300]

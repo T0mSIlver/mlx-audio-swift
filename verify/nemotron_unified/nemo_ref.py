@@ -26,6 +26,16 @@ CONTEXTS = {160: (1, 1), 240: (1, 2), 320: (1, 3), 560: (2, 5), 1120: (7, 7), 20
 LEFT = 70
 
 
+def context_for(latency):
+    """(chunk, right) for any latency: the table row at or below it gives the chunk,
+    the rest is right context (the ports' rule; NeMo itself takes both as inputs)."""
+    if latency in CONTEXTS:
+        return CONTEXTS[latency]
+    frames = min(max(int(latency / 80 + 0.5), 2), 26)
+    chunk = CONTEXTS[max(ms for ms in CONTEXTS if ms <= frames * 80)][0]
+    return chunk, frames - chunk
+
+
 def tokens_of(hyp):
     seq = hyp.y_sequence
     return seq.tolist() if hasattr(seq, "tolist") else list(seq)
@@ -128,7 +138,8 @@ def main():
                 jobs = list(alt.items())
             else:
                 jobs = [("offline", None)] if r.get("offline") else []
-                jobs += [(lat, (LEFT,) + CONTEXTS[lat]) for lat in r["latencies"] if not only or lat in only]
+                jobs += [(lat, (LEFT,) + context_for(lat)) for lat in r["latencies"] if not only or lat in only]
+                jobs += [(name, tuple(ctx)) for name, ctx in r.get("contexts", {}).items()]
             for lat, cr in jobs:
                 t0 = time.time()
                 steps = frames = None

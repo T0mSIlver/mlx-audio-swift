@@ -16,6 +16,31 @@ struct NemotronUnifiedVerifyTests {
         let lang: String
         let latencies: [Int]
         let offline: Bool?
+        let contexts: [String: [Int]]?
+    }
+
+    /// Every language string in NeMo's table (prompt_dictionary keys, bare codes, case
+    /// variants) resolves to NeMo's index; where NeMo raises, the port's documented
+    /// fallback is the default language's prompt. Needs NEMOTRON_VERIFY_PROMPT_TABLE.
+    @Test func promptLanguagesResolveLikeNeMo() throws {
+        let env = ProcessInfo.processInfo.environment
+        guard let tablePath = env["NEMOTRON_VERIFY_PROMPT_TABLE"], let modelDir = env["NEMOTRON_VERIFY_MODEL"] else {
+            print("Skipping Nemotron Unified prompt table: NEMOTRON_VERIFY_PROMPT_TABLE not set.")
+            return
+        }
+        let table = try JSONSerialization.jsonObject(with: Data(contentsOf: URL(fileURLWithPath: tablePath))) as! [String: Any]
+        let nemo = table["nemo"] as! [String: Any]
+        let model = try NemotronASRModel.fromDirectory(URL(fileURLWithPath: modelDir))
+        let fallback = model.promptDictionary[model.defaultLanguage]!
+        var mismatches: [String] = []
+        for (language, want) in nemo {
+            let expected = (want as? Int) ?? fallback
+            let got = model.resolvePromptIndex(language)
+            if got != expected { mismatches.append("\(language): NeMo \(want), port \(got)") }
+        }
+        print("prompt table: \(nemo.count) languages, \(mismatches.count) mismatches \(mismatches.sorted())")
+        #expect(model.resolvePromptIndex(nil) == model.promptDictionary["auto"])
+        #expect(mismatches.isEmpty)
     }
 
     @Test func runManifest() throws {
@@ -81,6 +106,9 @@ struct NemotronUnifiedVerifyTests {
             var runs: [(String, NemotronASRBufferedContext?)] =
                 row.latencies.filter { only.isEmpty || only.contains($0) }.map { ("\($0)", nil) }
             if row.latencies.contains(320) { runs += contexts.map { ($0.0, Optional($0.1)) } }
+            for (name, f) in (row.contexts ?? [:]).sorted(by: { $0.key < $1.key }) where f.count == 3 {
+                runs.append((name, NemotronASRBufferedContext(left: f[0], chunk: f[1], right: f[2])))
+            }
             for (latencyLabel, context) in runs {
                 let start = Date()
                 let session = context.map { model.makeStreamSession(language: row.lang, bufferedContext: $0) }
