@@ -3819,6 +3819,108 @@ struct NemotronASRTests {
 }
 
 struct VoxtralRealtimeSTTTests {
+
+    // MARK: Term boost (Metal-free: the booster only sees token ids and logits)
+
+    // A toy tokenizer: ids below 1000 are special, 32 is [STREAMING_PAD], 33 is
+    // [STREAMING_WORD]. Each piece is one token.
+    private static let boostPieces: [String: Int] = [
+        " Cl": 1001, "aude": 1002, " Code": 1003, " cl": 1004, " code": 1005,
+        " clo": 1006, "thes": 1007, " the": 1008, " ml": 1009, "x": 1010, " audio": 1011,
+        "-": 1012, "audio": 1013, " Ml": 1014,
+    ]
+
+    private static func boostEncode(_ text: String) -> [Int] {
+        // Greedy longest match over the toy pieces.
+        var ids: [Int] = []
+        var rest = Substring(text)
+        while !rest.isEmpty {
+            guard let piece = boostPieces.keys.filter({ rest.hasPrefix($0) }).max(by: { $0.count < $1.count })
+            else { rest = rest.dropFirst(); continue }
+            ids.append(boostPieces[piece]!)
+            rest = rest.dropFirst(piece.count)
+        }
+        return ids
+    }
+
+    private static let boostSpaced: Set<Int> = Set(boostPieces.filter { $0.key.hasPrefix(" ") }.map(\.value))
+
+    private func makeVoxtralBooster(
+        _ terms: [String], config: VoxtralRealtimeTermBoostConfig = .init()
+    ) -> VoxtralRealtimeTermBooster? {
+        VoxtralRealtimeTermBooster(
+            terms: terms, encode: Self.boostEncode, startsWithSpace: { Self.boostSpaced.contains($0) },
+            padToken: 32, firstTextToken: 1000, config: config)
+    }
+
+    private func logits(_ values: [Int: Float]) -> ([Int]) -> [Float] {
+        { ids in ids.map { values[$0] ?? -20 } }
+    }
+
+    @Test func termBoostPicksATermStartWithinTheMargin() throws {
+        let booster = try #require(makeVoxtralBooster(["Claude Code"]))
+        // " clo" leads " Cl" by 1.0; the first-token bonus (1.5) flips it.
+        #expect(booster.choose(greedy: 1006, logits: logits([1006: 0, 1001: -1])) == 1001)
+        #expect(booster.boostedTokenCount == 1)
+    }
+
+    @Test func termBoostContinuesAMatchAcrossPadsAndAWordBoundary() throws {
+        let booster = try #require(makeVoxtralBooster(["Claude Code"]))
+        booster.accept(1001)  // " Cl"
+        booster.accept(32)    // padding keeps the match
+        // "thes" leads "aude" by 3.0: more than the first-token bonus, less than
+        // the continuation bonus, inside the margin.
+        #expect(booster.choose(greedy: 1007, logits: logits([1007: 0, 1002: -3])) == 1002)
+        booster.accept(1002)  // "aude"
+        booster.accept(33)    // [STREAMING_WORD]: " Code" starts a word, so the match lives
+        #expect(booster.choose(greedy: 1005, logits: logits([1005: 0, 1003: -2.5])) == 1003)
+    }
+
+    @Test func termBoostNeverTurnsPaddingOrAWordBoundaryIntoText() throws {
+        let booster = try #require(makeVoxtralBooster(["Claude Code"]))
+        #expect(booster.choose(greedy: 32, logits: logits([32: 0, 1001: -0.1])) == 32)
+        #expect(booster.choose(greedy: 33, logits: logits([33: 0, 1001: -0.1])) == 33)
+    }
+
+    @Test func termBoostLeavesTokensOutsideTheMarginAlone() throws {
+        let booster = try #require(makeVoxtralBooster(["Claude Code"], config: .init(margin: 1)))
+        #expect(booster.choose(greedy: 1006, logits: logits([1006: 0, 1001: -1.5])) == 1006)
+    }
+
+    @Test func termBoostDropsAMatchThatStopsExtending() throws {
+        let booster = try #require(makeVoxtralBooster(["Claude Code"]))
+        booster.accept(1001)  // " Cl"
+        booster.accept(1007)  // "thes" ends it
+        #expect(booster.choose(greedy: 1008, logits: logits([1008: 0, 1002: -2.5])) == 1008)
+    }
+
+    @Test func termBoostEndsAMatchAtAWordBoundaryInsideAWord() throws {
+        let booster = try #require(makeVoxtralBooster(["Claude Code"]))
+        booster.accept(1001)  // " Cl"
+        booster.accept(33)    // "aude" does not start a word: the match ends here
+        #expect(booster.choose(greedy: 1007, logits: logits([1007: 0, 1002: -2.5])) == 1007)
+    }
+
+    @Test func termBoostReadsHyphensAsSpaces() throws {
+        let booster = try #require(makeVoxtralBooster(["mlx-audio"]))
+        booster.accept(1009)  // " ml"
+        booster.accept(1010)  // "x"
+        booster.accept(33)
+        // " audio" continues the spoken variant "mlx audio".
+        #expect(booster.choose(greedy: 1008, logits: logits([1008: 0, 1011: -3])) == 1011)
+    }
+
+    @Test func termBoostIgnoresNegativeBonuses() throws {
+        let booster = try #require(makeVoxtralBooster(["Claude Code"], config: .init(firstTokenBoost: -1)))
+        // " Cl" starts the term; " the" does not and must not win from it.
+        #expect(booster.choose(greedy: 1001, logits: logits([1001: 0, 1008: -0.1])) == 1001)
+    }
+
+    @Test func termBoostNeedsATermThatYieldsTokens() {
+        #expect(makeVoxtralBooster([]) == nil)
+        #expect(makeVoxtralBooster(["   "]) == nil)
+    }
+
     @Test func configDecodesNestedAudioEncodingArgs() throws {
         let json = """
         {
