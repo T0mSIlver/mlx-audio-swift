@@ -4023,7 +4023,7 @@ struct VoxtralRealtimeSTTTests {
 
     @Test func termBoostPicksATermStartWithinTheMargin() throws {
         let booster = try #require(makeVoxtralBooster(["Claude Code"]))
-        // " clo" leads " Cl" by 1.0; the first-token bonus (1.5) flips it.
+        // " clo" leads " Cl" by 1.0; the first-token bonus (2.5) flips it.
         #expect(booster.choose(greedy: 1006, logits: logits([1006: 0, 1001: -1])) == 1001)
         #expect(booster.boostedTokenCount == 1)
     }
@@ -4032,8 +4032,8 @@ struct VoxtralRealtimeSTTTests {
         let booster = try #require(makeVoxtralBooster(["Claude Code"]))
         booster.accept(1001)  // " Cl"
         booster.accept(32)    // padding keeps the match
-        // "thes" leads "aude" by 3.0: more than the first-token bonus, less than
-        // the continuation bonus, inside the margin.
+        // "thes" leads "aude" by 3.0: more than the first-token bonus (2.5), less
+        // than the continuation bonus (4.0), inside the margin (4.5).
         #expect(booster.choose(greedy: 1007, logits: logits([1007: 0, 1002: -3])) == 1002)
         booster.accept(1002)  // "aude"
         booster.accept(33)    // [STREAMING_WORD]: " Code" starts a word, so the match lives
