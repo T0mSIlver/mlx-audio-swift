@@ -106,8 +106,8 @@ public final class VoxtralRealtimeStreamSession {
     private var decCache: [VoxtralRealtimeDecoderKVCache?]?
     /// `evalPrediction` for the next position.
     private var pendingPrediction: MLXArray?
-    /// The logits behind `pendingPrediction`, kept only while a term booster is set
-    /// at temperature 0, so the boost can read a few of them back.
+    /// The logits behind `pendingPrediction`, kept at temperature 0 so a term
+    /// booster can read a few of them back, from the next token on.
     private var pendingLogits: MLXArray?
     private var booster: VoxtralRealtimeTermBooster?
     private var boostedCount = 0
@@ -143,17 +143,14 @@ public final class VoxtralRealtimeStreamSession {
     /// Whether the stream has emitted EOS / hit maxTokens.
     public var isFinished: Bool { done }
     /// Tokens the term boost chose over the unbiased argmax so far.
-    public var boostedTokenCount: Int { booster?.boostedTokenCount ?? boostedCount }
+    public var boostedTokenCount: Int { boostedCount }
 
     /// Boost `terms` while decoding from here on; an empty list turns the boost
     /// off. A later call replaces the list and drops any match under way, but keeps
     /// the running `boostedTokenCount`. Greedy decoding only: above temperature 0
     /// the list is ignored.
     public func setBoostTerms(_ terms: [String], config: VoxtralRealtimeTermBoostConfig = .init()) {
-        boostedCount = boostedTokenCount
-        booster = temperature == 0
-            ? model.makeTermBooster(terms: terms, config: config, boostedTokenCount: boostedCount)
-            : nil
+        booster = temperature == 0 ? model.makeTermBooster(terms: terms, config: config) : nil
     }
 
     /// Buffered samples, conv-stem rows and adapter rows currently held. For tests.
@@ -339,12 +336,12 @@ public final class VoxtralRealtimeStreamSession {
         prefilled = true
     }
 
-    /// The next position's prediction, plus its logits while a booster needs them.
-    /// Evaluating the argmax materializes the logits it reads, so keeping a reference
-    /// costs memory for one vocabulary row and no extra sync.
+    /// The next position's prediction, plus its logits at temperature 0. Evaluating
+    /// the argmax materializes the logits it reads, so keeping a reference costs one
+    /// vocabulary row of memory and no extra sync.
     private func setPending(logits: MLXArray) {
         pendingPrediction = model.evalPrediction(logits, temperature: temperature)
-        pendingLogits = booster != nil && temperature == 0 ? logits : nil
+        pendingLogits = temperature == 0 ? logits : nil
     }
 
     private func decode(adapter: MLXArray, upTo emitLimit: Int) -> Delta {
@@ -358,10 +355,12 @@ public final class VoxtralRealtimeStreamSession {
             guard let prediction = pendingPrediction else { break }
             var token = model.readToken(prediction, temperature: temperature)
             if let booster, let logits = pendingLogits {
-                token = booster.choose(greedy: token) { ids in
+                let greedy = token
+                token = booster.choose(greedy: greedy) { ids in
                     logits.take(MLXArray(ids.map(Int32.init)), axis: -1)
                         .asType(.float32).asArray(Float.self)
                 }
+                if token != greedy { boostedCount += 1 }
             }
             booster?.accept(token)
             generated.append(token)

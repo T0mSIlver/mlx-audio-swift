@@ -473,7 +473,7 @@ extension VoxtralRealtimeModel {
     /// A booster for `terms`, built with this model's tokenizer; nil without a
     /// tokenizer or when no term yields a token.
     func makeTermBooster(
-        terms: [String], config boostConfig: VoxtralRealtimeTermBoostConfig, boostedTokenCount: Int
+        terms: [String], config boostConfig: VoxtralRealtimeTermBoostConfig
     ) -> VoxtralRealtimeTermBooster? {
         guard let tokenizer else { return nil }
         return VoxtralRealtimeTermBooster(
@@ -482,8 +482,7 @@ extension VoxtralRealtimeModel {
             startsWithSpace: { tokenizer.tokenBytes(for: $0).first == UInt8(ascii: " ") },
             padToken: config.streamingPadTokenId,
             firstTextToken: tokenizer.nSpecial,
-            config: boostConfig,
-            boostedTokenCount: boostedTokenCount
+            config: boostConfig
         )
     }
 
