@@ -1,0 +1,202 @@
+# Verification only (not for merge): Nemotron Unified ports against NeMo on public FLEURS audio.
+name: Verify Nemotron Unified
+
+on:
+  push:
+    branches:
+      - 'verify/nemotron-unified*'
+  workflow_dispatch:
+
+env:
+  NEMO_REV: 023ce907267a09a308a5cb69239447cb3d0c1597
+  NEMO_SPEECH_SHA: 0c7af3351eb73ec7ad566f770623023e71187c92
+  MLX_AUDIO_SHA: 6dc739eaf9e3b76ee38947bc0d187190161759ca
+  PY: '3.12'
+
+jobs:
+  prefetch:
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    steps:
+      - uses: actions/setup-python@v5
+        with: { python-version: '${{ env.PY }}' }
+      - id: ckpt
+        uses: actions/cache@v4
+        with:
+          path: ckpt
+          key: nemo-unified-${{ env.NEMO_REV }}
+          enableCrossOsArchive: true
+      - if: steps.ckpt.outputs.cache-hit != 'true'
+        run: |
+          pip install -q huggingface_hub
+          python -c "from huggingface_hub import hf_hub_download as d; d('nvidia/nemotron-labs-unified-asr-0.6b', 'nemotron-labs-unified-asr-0.6b.nemo', revision='$NEMO_REV', local_dir='ckpt')"
+          ls -la ckpt
+      - id: venv
+        uses: actions/cache@v4
+        with:
+          path: nemo-venv
+          key: nemo-venv-${{ runner.os }}-${{ env.PY }}-${{ env.NEMO_SPEECH_SHA }}
+      - if: steps.venv.outputs.cache-hit != 'true'
+        run: |
+          python -m venv nemo-venv
+          nemo-venv/bin/pip install -q torch torchaudio --index-url https://download.pytorch.org/whl/cpu
+          nemo-venv/bin/pip install -q "nemo-toolkit[asr] @ git+https://github.com/NVIDIA-NeMo/Speech.git@${NEMO_SPEECH_SHA}"
+          nemo-venv/bin/python -c "import nemo, torch; print(nemo.__version__, torch.__version__)"
+
+  clips:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: { python-version: '${{ env.PY }}' }
+      - run: pip install -q huggingface_hub soundfile scipy numpy
+      - run: python verify/nemotron_unified/make_clips.py clips --per-lang 5 --long-minutes 2,10
+      - uses: actions/upload-artifact@v4
+        with: { name: clips, path: clips, retention-days: 5 }
+
+  nemo:
+    needs: [prefetch, clips]
+    runs-on: ubuntu-latest
+    timeout-minutes: 300
+    strategy:
+      fail-fast: false
+      matrix:
+        part: [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: { python-version: '${{ env.PY }}' }
+      - uses: actions/cache/restore@v4
+        with: { path: ckpt, key: 'nemo-unified-${{ env.NEMO_REV }}', enableCrossOsArchive: true, fail-on-cache-miss: true }
+      - uses: actions/cache/restore@v4
+        with: { path: nemo-venv, key: 'nemo-venv-${{ runner.os }}-${{ env.PY }}-${{ env.NEMO_SPEECH_SHA }}', fail-on-cache-miss: true }
+      - uses: actions/download-artifact@v4
+        with: { name: clips, path: clips }
+      - run: >-
+          nemo-venv/bin/python verify/nemotron_unified/nemo_ref.py ckpt/nemotron-labs-unified-asr-0.6b.nemo
+          clips/manifest.jsonl nemo-${{ matrix.part }}.jsonl --shard ${{ matrix.part }}/16
+          --kinds fleurs,silence,noise,music,clipped,padded,tiny,command,samplerate,stereo
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with: { name: 'nemo-${{ matrix.part }}', path: 'nemo-${{ matrix.part }}.jsonl', retention-days: 5 }
+
+  nemo-long:
+    needs: [prefetch, clips]
+    runs-on: ubuntu-latest
+    timeout-minutes: 340
+    strategy:
+      fail-fast: false
+      matrix:
+        job:
+          - { ids: long-en-2min, lat: '320' }
+          - { ids: long-en-2min, lat: '1120' }
+          - { ids: long-fr-2min, lat: '320' }
+          - { ids: long-fr-2min, lat: '1120' }
+          - { ids: long-en-10min, lat: '320' }
+          - { ids: long-en-10min, lat: '2080' }
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: { python-version: '${{ env.PY }}' }
+      - uses: actions/cache/restore@v4
+        with: { path: ckpt, key: 'nemo-unified-${{ env.NEMO_REV }}', enableCrossOsArchive: true, fail-on-cache-miss: true }
+      - uses: actions/cache/restore@v4
+        with: { path: nemo-venv, key: 'nemo-venv-${{ runner.os }}-${{ env.PY }}-${{ env.NEMO_SPEECH_SHA }}', fail-on-cache-miss: true }
+      - uses: actions/download-artifact@v4
+        with: { name: clips, path: clips }
+      - run: >-
+          nemo-venv/bin/python verify/nemotron_unified/nemo_ref.py ckpt/nemotron-labs-unified-asr-0.6b.nemo
+          clips/manifest.jsonl out.jsonl --ids ${{ matrix.job.ids }} --latencies ${{ matrix.job.lat }}
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with: { name: 'nemo-long-${{ matrix.job.ids }}-${{ matrix.job.lat }}', path: out.jsonl, retention-days: 5 }
+
+  py:
+    needs: [prefetch, clips]
+    runs-on: macos-15
+    timeout-minutes: 340
+    strategy:
+      fail-fast: false
+      matrix:
+        quant:
+          - { label: fp32, args: '--dtype float32' }
+          - { label: bf16, args: '--dtype bfloat16' }
+          - { label: 8bit, args: '--dtype bfloat16 -q --q-bits 8 --q-group-size 64' }
+          - { label: 4bit, args: '--dtype bfloat16 -q --q-bits 4 --q-group-size 64' }
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: { python-version: '${{ env.PY }}' }
+      - uses: actions/cache/restore@v4
+        with: { path: ckpt, key: 'nemo-unified-${{ env.NEMO_REV }}', enableCrossOsArchive: true, fail-on-cache-miss: true }
+      - uses: actions/download-artifact@v4
+        with: { name: clips, path: clips }
+      - name: Install the Python port
+        run: |
+          python -m venv py
+          py/bin/pip install -q torch pyyaml "mlx-audio @ git+https://github.com/T0mSIlver/mlx-audio.git@${MLX_AUDIO_SHA}"
+          py/bin/python -c "import mlx.core as mx; print(mx.__version__, mx.default_device())"
+      - name: Convert
+        run: |
+          py/bin/python -m mlx_audio.stt.models.nemotron_asr.convert --nemo-path ckpt/nemotron-labs-unified-asr-0.6b.nemo --mlx-path model ${{ matrix.quant.args }}
+          ls -la model; shasum -a 256 model/model.safetensors
+      - name: Python port
+        run: py/bin/python verify/nemotron_unified/mlx_run.py model ${{ matrix.quant.label }} clips/manifest.jsonl py-${{ matrix.quant.label }}.jsonl
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with: { name: 'py-${{ matrix.quant.label }}', path: 'py-${{ matrix.quant.label }}.jsonl', retention-days: 5 }
+
+  swift:
+    needs: [prefetch, clips]
+    runs-on: macos-15
+    timeout-minutes: 340
+    strategy:
+      fail-fast: false
+      matrix:
+        quant:
+          - { label: fp32, args: '--dtype float32' }
+          - { label: bf16, args: '--dtype bfloat16' }
+          - { label: 8bit, args: '--dtype bfloat16 -q --q-bits 8 --q-group-size 64' }
+          - { label: 4bit, args: '--dtype bfloat16 -q --q-bits 4 --q-group-size 64' }
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: { python-version: '${{ env.PY }}' }
+      - uses: actions/cache/restore@v4
+        with: { path: ckpt, key: 'nemo-unified-${{ env.NEMO_REV }}', enableCrossOsArchive: true, fail-on-cache-miss: true }
+      - uses: actions/download-artifact@v4
+        with: { name: clips, path: clips }
+      - name: Install the Python port
+        run: |
+          python -m venv py
+          py/bin/pip install -q torch pyyaml "mlx-audio @ git+https://github.com/T0mSIlver/mlx-audio.git@${MLX_AUDIO_SHA}"
+          py/bin/python -c "import mlx.core as mx; print(mx.__version__, mx.default_device())"
+      - name: Convert
+        run: |
+          py/bin/python -m mlx_audio.stt.models.nemotron_asr.convert --nemo-path ckpt/nemotron-labs-unified-asr-0.6b.nemo --mlx-path model ${{ matrix.quant.args }}
+          ls -la model; shasum -a 256 model/model.safetensors
+      - name: Select Xcode version
+        uses: maxim-lobanov/setup-xcode@v1
+        with: { xcode-version: latest }
+      - name: Install Metal toolchain
+        run: xcodebuild -downloadComponent MetalToolchain
+      - name: Build Swift
+        run: >-
+          xcodebuild build-for-testing -scheme MLXAudio-Package -destination 'platform=macOS'
+          -derivedDataPath "$RUNNER_TEMP/DerivedData" -clonedSourcePackagesDirPath "$RUNNER_TEMP/SourcePackages"
+          MACOSX_DEPLOYMENT_TARGET=14.0 CODE_SIGNING_ALLOWED=NO COMPILER_INDEX_STORE_ENABLE=NO -quiet
+      - name: Swift port
+        env:
+          NEMOTRON_VERIFY_MANIFEST: ${{ github.workspace }}/clips/manifest.jsonl
+          NEMOTRON_VERIFY_MODEL: ${{ github.workspace }}/model
+          NEMOTRON_VERIFY_OUT: ${{ github.workspace }}/swift-${{ matrix.quant.label }}.jsonl
+          NEMOTRON_VERIFY_LABEL: ${{ matrix.quant.label }}
+        run: >-
+          xcodebuild test-without-building -scheme MLXAudio-Package -destination 'platform=macOS'
+          -derivedDataPath "$RUNNER_TEMP/DerivedData" -clonedSourcePackagesDirPath "$RUNNER_TEMP/SourcePackages"
+          -only-testing:'MLXAudioTests/NemotronUnifiedVerifyTests'
+          MACOSX_DEPLOYMENT_TARGET=14.0 CODE_SIGNING_ALLOWED=NO COMPILER_INDEX_STORE_ENABLE=NO
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with: { name: 'swift-${{ matrix.quant.label }}', path: 'swift-${{ matrix.quant.label }}.jsonl', retention-days: 5 }
