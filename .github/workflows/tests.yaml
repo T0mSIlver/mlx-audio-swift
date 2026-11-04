@@ -7,6 +7,7 @@ on:
   push:
     branches:
       - main
+      - ci/term-boost
   pull_request:
     branches:
       - main
@@ -67,3 +68,24 @@ jobs:
           MACOSX_DEPLOYMENT_TARGET=14.0
           CODE_SIGNING_ALLOWED=NO
           COMPILER_INDEX_STORE_ENABLE=NO
+      - name: Nemotron MLX runtime tests (CI-only)
+        shell: bash
+        env:
+          # xcodebuild passes only TEST_RUNNER_-prefixed variables to the tests.
+          TEST_RUNNER_MLXAUDIO_ENABLE_MLX_RUNTIME_TESTS: '1'
+        run: |
+          set -o pipefail
+          xcodebuild test-without-building \
+            -scheme MLXAudio-Package \
+            -destination 'platform=macOS' \
+            -derivedDataPath "$DERIVED_DATA_PATH" \
+            -clonedSourcePackagesDirPath "$SOURCE_PACKAGES_PATH" \
+            -only-testing:'MLXAudioTests/NemotronASRTests' \
+            -only-testing:'MLXAudioTests/VoxtralRealtimeSTTTests' \
+            MACOSX_DEPLOYMENT_TARGET=14.0 \
+            CODE_SIGNING_ALLOWED=NO \
+            COMPILER_INDEX_STORE_ENABLE=NO | tee nemotron-runtime.log
+          if grep -q "Skipping Nemotron ASR MLX runtime test" nemotron-runtime.log; then
+            echo "::error::Nemotron runtime tests were skipped"
+            exit 1
+          fi
