@@ -33,10 +33,18 @@ struct NemotronUnifiedVerifyTests {
         let push = Int(env["NEMOTRON_VERIFY_PUSH"] ?? "") ?? 1280
 
         let loadStart = Date()
-        // fp32 runs fp32 compute; everything else the default bf16.
-        let model = try NemotronASRModel.fromDirectory(
-            URL(fileURLWithPath: modelDir), computeDType: label == "fp32" ? .float32 : .bfloat16
-        )
+        // fp32 runs fp32 compute, a "-fp16" label float16 (as speechd loads Unified),
+        // everything else the default bf16.
+        let dtype: DType = label == "fp32" ? .float32 : (label.hasSuffix("-fp16") ? .float16 : .bfloat16)
+        let model = try NemotronASRModel.fromDirectory(URL(fileURLWithPath: modelDir), computeDType: dtype)
+        // Extra buffer layouts, "name:left,chunk,right;...", run after the manifest latencies.
+        let contexts: [(String, NemotronASRBufferedContext)] = (env["NEMOTRON_VERIFY_CONTEXTS"] ?? "")
+            .split(separator: ";").compactMap { spec in
+                let parts = spec.split(separator: ":")
+                let f = parts.count == 2 ? parts[1].split(separator: ",").compactMap { Int($0) } : []
+                guard f.count == 3 else { return nil }
+                return (String(parts[0]), NemotronASRBufferedContext(left: f[0], chunk: f[1], right: f[2]))
+            }
         print("load \(Date().timeIntervalSince(loadStart))s")
         let manifestURL = URL(fileURLWithPath: manifestPath)
         let root = manifestURL.deletingLastPathComponent()
@@ -70,9 +78,13 @@ struct NemotronUnifiedVerifyTests {
                     "text": output.text, "seconds": Date().timeIntervalSince(start),
                 ])
             }
-            for latency in row.latencies where only.isEmpty || only.contains(latency) {
+            var runs: [(String, NemotronASRBufferedContext?)] =
+                row.latencies.filter { only.isEmpty || only.contains($0) }.map { ("\($0)", nil) }
+            if row.latencies.contains(320) { runs += contexts.map { ($0.0, Optional($0.1)) } }
+            for (latencyLabel, context) in runs {
                 let start = Date()
-                let session = model.makeStreamSession(language: row.lang, chunkMs: latency)
+                let session = context.map { model.makeStreamSession(language: row.lang, bufferedContext: $0) }
+                    ?? model.makeStreamSession(language: row.lang, chunkMs: Int(latencyLabel)!)
                 var deltas = ""
                 var i = 0
                 var steps = 0
@@ -101,8 +113,8 @@ struct NemotronUnifiedVerifyTests {
                 let finishStart = Date()
                 deltas += session.finish().text
                 try write([
-                    "id": row.id, "latency": latency, "impl": "swift-\(label)",
-                    "tokens": session.tokens, "text": session.text, "delta_text": deltas,
+                    "id": row.id, "latency": Int(latencyLabel).map { $0 as Any } ?? latencyLabel,
+                    "impl": "swift-\(label)", "tokens": session.tokens, "text": session.text, "delta_text": deltas,
                     "seconds": Date().timeIntervalSince(start), "pushes": steps, "max_push_s": maxStep,
                     "max_push_at_s": maxStepAt, "finish_s": Date().timeIntervalSince(finishStart),
                     "minute_mean_push_ms": minuteMs, "minute_active_mb": minuteMB,
