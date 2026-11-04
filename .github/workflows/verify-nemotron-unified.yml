@@ -131,7 +131,10 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        clip: [conversational_a, en_woman]
+        clip:
+          - { id: false-turn, lang: en, src: 'cp Tests/media/false-turn.wav' }
+          - { id: conversational_fr, lang: fr, src: 'cp Tests/media/conversational_fr.wav' }
+          - { id: clean, lang: en, src: 'curl -sSfL -o fx/wav/clean.wav https://raw.githubusercontent.com/Neywa-Labs/mlx-audio/e083358/mlx_audio/stt/tests/mega_asr/fixtures/clean.wav #' }
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -143,14 +146,13 @@ jobs:
       - name: Fixture clips (the repos' own test audio)
         run: |
           mkdir -p fx/wav
-          cp Tests/media/conversational_a.wav fx/wav/
-          curl -sSfL -o fx/wav/en_woman.wav https://raw.githubusercontent.com/Neywa-Labs/mlx-audio/e083358/examples/voice_prompts/en_woman.wav
-          printf '{"id":"%s","file":"wav/%s.wav","lang":"en","text":null,"kind":"fixture","latencies":[160,320,560,1120,2080],"offline":true,"seconds":1}\n' ${{ matrix.clip }} ${{ matrix.clip }} > fx/manifest.jsonl
+          ${{ matrix.clip.src }} fx/wav/
+          printf '{"id":"%s","file":"wav/%s.wav","lang":"%s","text":null,"kind":"fixture","latencies":[160,320,560,1120,2080],"offline":true,"seconds":1}\n' ${{ matrix.clip.id }} ${{ matrix.clip.id }} ${{ matrix.clip.lang }} > fx/manifest.jsonl
           sha256sum fx/wav/*.wav
-      - run: PYTHONPATH=nemo-venv python verify/nemotron_unified/nemo_ref.py ckpt/nemotron-labs-unified-asr-0.6b.nemo fx/manifest.jsonl fixture-${{ matrix.clip }}.jsonl
+      - run: PYTHONPATH=nemo-venv python verify/nemotron_unified/nemo_ref.py ckpt/nemotron-labs-unified-asr-0.6b.nemo fx/manifest.jsonl fixture-${{ matrix.clip.id }}.jsonl
       - uses: actions/upload-artifact@v4
         if: always()
-        with: { name: 'fixture-${{ matrix.clip }}', path: 'fixture-${{ matrix.clip }}.jsonl', retention-days: 5 }
+        with: { name: 'fixture-${{ matrix.clip.id }}', path: 'fixture-${{ matrix.clip.id }}.jsonl', retention-days: 5 }
 
   nemo-long:
     if: inputs.only == '' || inputs.only == null || contains(format(',{0},', inputs.only), ',nemo-long,')
