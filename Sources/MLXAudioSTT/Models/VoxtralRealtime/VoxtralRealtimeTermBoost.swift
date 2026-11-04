@@ -51,13 +51,27 @@ final class VoxtralRealtimeTermBooster {
 
     final class Node {
         var children: [Int: Node] = [:]
-        /// A child token begins with a space, so a match here survives a word boundary.
-        var startsWord = false
+        /// The children whose token begins with a space: the only ones a match may
+        /// continue with after a word boundary.
+        var wordStarts: Set<Int> = []
+    }
+
+    /// A match under way. After [STREAMING_WORD] it may only continue with a token
+    /// that starts a new word.
+    private struct Match {
+        let node: Node
+        var afterWord = false
+
+        var nextTokens: [Int] { afterWord ? Array(node.wordStarts) : Array(node.children.keys) }
+
+        func next(_ token: Int) -> Node? {
+            afterWord && !node.wordStarts.contains(token) ? nil : node.children[token]
+        }
     }
 
     let config: VoxtralRealtimeTermBoostConfig
     private let root = Node()
-    private var live: [Node] = []
+    private var live: [Match] = []
     private let padToken: Int
     private let wordToken: Int
     private let firstTextToken: Int
@@ -85,7 +99,7 @@ final class VoxtralRealtimeTermBooster {
                     } else {
                         let child = Node()
                         node.children[token] = child
-                        if startsWithSpace(token) { node.startsWord = true }
+                        if startsWithSpace(token) { node.wordStarts.insert(token) }
                         node = child
                     }
                 }
@@ -132,15 +146,15 @@ final class VoxtralRealtimeTermBooster {
     func accept(_ token: Int) {
         if token == padToken { return }
         if token == wordToken {
-            live = live.filter(\.startsWord)
+            live = live.filter { !$0.node.wordStarts.isEmpty }.map { Match(node: $0.node, afterWord: true) }
             return
         }
         guard token >= firstTextToken else {
             live = []
             return
         }
-        var next = live.compactMap { $0.children[token] }
-        if let start = root.children[token] { next.append(start) }
+        var next = live.compactMap { $0.next(token).map { Match(node: $0) } }
+        if let start = root.children[token] { next.append(Match(node: start)) }
         live = next
     }
 
@@ -152,8 +166,8 @@ final class VoxtralRealtimeTermBooster {
         let continuation = max(config.continuationBoost, 0)
         var bonuses: [Int: Float] = [:]
         for token in root.children.keys { bonuses[token] = first }
-        for node in live {
-            for token in node.children.keys {
+        for match in live {
+            for token in match.nextTokens {
                 bonuses[token] = max(bonuses[token] ?? 0, continuation)
             }
         }
