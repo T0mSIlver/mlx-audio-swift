@@ -4,7 +4,12 @@ Per model: FLEURS WER offline and through the live session (80 ms pushes) at eac
 both models support; then one 2-minute English monologue through the live session at
 each latency, timing every step and reading MLX's peak memory.
 
-usage: python vs35.py MANIFEST OUT.json LABEL=MODEL [LABEL=MODEL ...]
+usage: python vs35.py MANIFEST OUT.json LABEL=MODEL[@JOBS] ...
+
+JOBS is a comma list of latencies in ms and/or "offline" (default: offline,160,560,1120).
+A cache-aware (3.5) checkpoint gets its latency by setting its default context to
+[left, lookahead] directly: its session ignores transcription_delay_ms unless the config
+says model_type nemotron_asr_streaming, which the mlx-community 3.5 conversions do not.
 """
 
 import json
@@ -20,6 +25,7 @@ import numpy as np
 from mlx_audio.stt.utils import load, load_audio
 
 LATENCIES = [160, 560, 1120]
+LOOKAHEAD_35 = {80: 0, 160: 1, 320: 3, 560: 6, 1120: 13}  # cache-aware: latency = (lookahead + 1) * 80 ms
 PUSH = 1280  # 80 ms at 16 kHz
 
 
@@ -45,7 +51,11 @@ def wer(per_clip, ids):
 
 def live(model, samples, lang, latency):
     """Feed 80 ms pushes as a server would; return text, step times, first-text audio time."""
-    s = model.create_streaming_session(language=lang, transcription_delay_ms=latency)
+    if not model.buffered:
+        model.default_att_context_size = [model.default_att_context_size[0], LOOKAHEAD_35[latency]]
+    s = model.create_streaming_session(language=lang, transcription_delay_ms=latency if model.buffered else None)
+    if not model.buffered:
+        assert s.att_context_size[1] == LOOKAHEAD_35[latency], s.att_context_size
     pieces, steps, first = [], [], None
     for i in range(0, len(samples), PUSH):
         s.feed(samples[i : i + PUSH])
@@ -69,9 +79,12 @@ def main():
     result = {}
     for spec in specs:
         label, path = spec.split("=", 1)
+        path, _, jobs = path.partition("@")
+        jobs = [j if j == "offline" else int(j) for j in (jobs or "offline,160,560,1120").split(",")]
+        lats = [j for j in jobs if j != "offline"]
         model = load(path)
         res = {"model": path, "wer": {}, "speed": {}}
-        for lat in ["offline"] + LATENCIES:
+        for lat in jobs:
             per_clip = {}
             for r in fleurs:
                 audio = np.array(load_audio(str(manifest.parent / r["file"]), sr=16000), dtype=np.float32)
@@ -89,8 +102,8 @@ def main():
             res["wer"][str(lat)] = per_clip
             print(label, lat, wer(per_clip, per_clip), file=sys.stderr, flush=True)
         audio = np.array(load_audio(str(manifest.parent / mono["file"]), sr=16000), dtype=np.float32)
-        live(model, audio[: 3 * 16000], "en", LATENCIES[0])  # warm-up
-        for lat in LATENCIES:
+        live(model, audio[: 3 * 16000], "en", lats[0])  # warm-up
+        for lat in lats:
             mx.clear_cache()
             mx.reset_peak_memory()
             _, steps, first = live(model, audio, "en", lat)
@@ -107,11 +120,10 @@ def main():
         del model
         mx.clear_cache()
     # WER over the clips every model transcribed, so the rows compare like for like.
-    for lat in ["offline"] + [str(l) for l in LATENCIES]:
-        common = set.intersection(
-            *({i for i, v in r["wer"][lat].items() if isinstance(v, list)} for r in result.values())
-        )
-        for label, r in result.items():
+    for lat in sorted({l for r in result.values() for l in r["wer"]}):
+        have = [r for r in result.values() if lat in r["wer"]]
+        common = set.intersection(*({i for i, v in r["wer"][lat].items() if isinstance(v, list)} for r in have))
+        for r in have:
             r.setdefault("wer_common", {})[lat] = {"wer": wer(r["wer"][lat], common), "clips": len(common)}
     json.dump(result, open(out_path, "w"), indent=1)
     print(json.dumps({k: {"wer_common": v["wer_common"], "speed": v["speed"]} for k, v in result.items()}, indent=1))
