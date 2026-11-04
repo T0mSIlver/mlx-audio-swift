@@ -74,19 +74,36 @@ struct NemotronUnifiedVerifyTests {
                 var i = 0
                 var steps = 0
                 var maxStep = 0.0
+                var maxStepAt = 0.0
+                // Per minute of audio: mean push time and active memory, to see drift.
+                var minuteMs: [Double] = [], minuteMB: [Double] = []
+                var bucketSum = 0.0, bucketCount = 0
                 while i < samples.count {
                     let end = min(i + push, samples.count)
                     let stepStart = Date()
                     deltas += session.step(Array(samples[i..<end])).text
-                    maxStep = max(maxStep, Date().timeIntervalSince(stepStart))
+                    let took = Date().timeIntervalSince(stepStart)
+                    if took > maxStep { maxStep = took; maxStepAt = Double(end) / 16000 }
+                    bucketSum += took
+                    bucketCount += 1
+                    if end / (60 * 16000) > i / (60 * 16000) {
+                        minuteMs.append(bucketSum / Double(bucketCount) * 1000)
+                        minuteMB.append(Double(Memory.activeMemory) / 1_048_576)
+                        bucketSum = 0
+                        bucketCount = 0
+                    }
                     steps += 1
                     i = end
                 }
+                let finishStart = Date()
                 deltas += session.finish().text
                 try write([
                     "id": row.id, "latency": latency, "impl": "swift-\(label)",
                     "tokens": session.tokens, "text": session.text, "delta_text": deltas,
                     "seconds": Date().timeIntervalSince(start), "pushes": steps, "max_push_s": maxStep,
+                    "max_push_at_s": maxStepAt, "finish_s": Date().timeIntervalSince(finishStart),
+                    "minute_mean_push_ms": minuteMs, "minute_active_mb": minuteMB,
+                    "peak_mb": Double(Memory.peakMemory) / 1_048_576,
                 ])
                 Memory.clearCache()
             }

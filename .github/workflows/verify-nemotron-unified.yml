@@ -13,6 +13,9 @@ on:
       only:
         description: 'Comma list of heavy jobs to run (nemo,nemo-long,nemo-alt,py,swift,profile); empty runs all but nemo-alt'
         default: ''
+      kinds:
+        description: 'Clip kinds for the Swift job (comma list); empty = all'
+        default: ''
 
 env:
   NEMO_REV: 023ce907267a09a308a5cb69239447cb3d0c1597
@@ -235,6 +238,7 @@ jobs:
           TEST_RUNNER_NEMOTRON_VERIFY_MODEL: ${{ github.workspace }}/model
           TEST_RUNNER_NEMOTRON_VERIFY_OUT: ${{ github.workspace }}/swift-${{ matrix.quant.label }}.jsonl
           TEST_RUNNER_NEMOTRON_VERIFY_LABEL: ${{ matrix.quant.label }}
+          TEST_RUNNER_NEMOTRON_VERIFY_KINDS: ${{ inputs.kinds }}
         run: >-
           xcodebuild test-without-building -scheme MLXAudio-Package -destination 'platform=macOS'
           -derivedDataPath "$RUNNER_TEMP/DerivedData" -clonedSourcePackagesDirPath "$RUNNER_TEMP/SourcePackages"
