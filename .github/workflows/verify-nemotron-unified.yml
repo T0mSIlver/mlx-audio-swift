@@ -123,6 +123,35 @@ jobs:
         if: always()
         with: { name: 'nemo-alt-${{ matrix.part }}', path: 'alt-${{ matrix.part }}.jsonl', retention-days: 5 }
 
+  fixtures:
+    if: contains(format(',{0},', inputs.only), ',fixtures,')
+    needs: [prefetch]
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        clip: [conversational_a, en_woman]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: { python-version: '${{ env.PY }}' }
+      - uses: actions/cache/restore@v4
+        with: { path: ckpt, key: 'nemo-unified-${{ env.NEMO_REV }}', enableCrossOsArchive: true, fail-on-cache-miss: true }
+      - uses: actions/cache/restore@v4
+        with: { path: nemo-venv, key: 'nemo-site-${{ runner.os }}-${{ env.PY }}-${{ env.NEMO_SPEECH_SHA }}', fail-on-cache-miss: true }
+      - name: Fixture clips (the repos' own test audio)
+        run: |
+          mkdir -p fx/wav
+          cp Tests/media/conversational_a.wav fx/wav/
+          curl -sSfL -o fx/wav/en_woman.wav https://raw.githubusercontent.com/Neywa-Labs/mlx-audio/e083358/examples/voice_prompts/en_woman.wav
+          printf '{"id":"%s","file":"wav/%s.wav","lang":"en","text":null,"kind":"fixture","latencies":[160,320,560,1120,2080],"offline":true,"seconds":1}\n' ${{ matrix.clip }} ${{ matrix.clip }} > fx/manifest.jsonl
+          sha256sum fx/wav/*.wav
+      - run: PYTHONPATH=nemo-venv python verify/nemotron_unified/nemo_ref.py ckpt/nemotron-labs-unified-asr-0.6b.nemo fx/manifest.jsonl fixture-${{ matrix.clip }}.jsonl
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with: { name: 'fixture-${{ matrix.clip }}', path: 'fixture-${{ matrix.clip }}.jsonl', retention-days: 5 }
+
   nemo-long:
     if: inputs.only == '' || inputs.only == null || contains(format(',{0},', inputs.only), ',nemo-long,')
     needs: [prefetch, clips]
