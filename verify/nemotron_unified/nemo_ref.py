@@ -94,6 +94,7 @@ def main():
     ap.add_argument("--kinds", default="")
     ap.add_argument("--ids", default="")
     ap.add_argument("--latencies", default="")
+    ap.add_argument("--contexts", default="", help="NAME:L,C,R;... run these contexts instead of the manifest latencies")
     args = ap.parse_args()
     torch.set_grad_enabled(False)
     torch.set_num_threads(os.cpu_count() or 4)
@@ -107,6 +108,10 @@ def main():
     # Interleave by cost so shards finish together.
     rows = sorted(rows, key=lambda r: -r["seconds"])[i::n]
     only = [int(v) for v in args.latencies.split(",") if v]
+    alt = {}
+    for spec in [x for x in args.contexts.split(";") if x]:
+        name, ctx = spec.split(":")
+        alt[name] = tuple(int(v) for v in ctx.split(","))
 
     m = ASRModel.restore_from(args.nemo, map_location="cpu")
     m.eval()
@@ -119,8 +124,11 @@ def main():
             audio, _ = librosa.load(str(root / r["file"]), sr=16000)  # NeMo's own loader: mono, soxr
             audio = torch.tensor(audio, dtype=torch.float32)[None]
             prompt = torch.tensor([m.resolve_prompt_language(r["lang"])], dtype=torch.long)
-            jobs = [("offline", None)] if r.get("offline") else []
-            jobs += [(lat, CONTEXTS[lat]) for lat in r["latencies"] if not only or lat in only]
+            if alt:
+                jobs = list(alt.items())
+            else:
+                jobs = [("offline", None)] if r.get("offline") else []
+                jobs += [(lat, (LEFT,) + CONTEXTS[lat]) for lat in r["latencies"] if not only or lat in only]
             for lat, cr in jobs:
                 t0 = time.time()
                 steps = frames = None
@@ -129,7 +137,8 @@ def main():
                     if lat == "offline":
                         toks = offline(m, audio, prompt)
                     else:
-                        toks, steps, frames = streaming(m, audio, prompt, *cr)
+                        left, chunk, right = cr
+                        toks, steps, frames = streaming(m, audio, prompt, chunk, right, left=left)
                 except Exception as e:  # the reference itself may reject degenerate input
                     toks, err = [], f"{type(e).__name__}: {e}"[:300]
                 rec = {

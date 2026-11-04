@@ -11,7 +11,7 @@ on:
   workflow_dispatch:
     inputs:
       only:
-        description: 'Comma list of heavy jobs to run (nemo,nemo-long,py,swift,profile); empty runs all'
+        description: 'Comma list of heavy jobs to run (nemo,nemo-long,nemo-alt,py,swift,profile); empty runs all but nemo-alt'
         default: ''
 
 env:
@@ -88,6 +88,34 @@ jobs:
       - uses: actions/upload-artifact@v4
         if: always()
         with: { name: 'nemo-${{ matrix.part }}', path: 'nemo-${{ matrix.part }}.jsonl', retention-days: 5 }
+
+  nemo-alt:
+    if: contains(format(',{0},', inputs.only), ',nemo-alt,')
+    needs: [prefetch, clips]
+    runs-on: ubuntu-latest
+    timeout-minutes: 300
+    strategy:
+      fail-fast: false
+      max-parallel: 4
+      matrix:
+        part: [0, 1, 2, 3, 4, 5]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: { python-version: '${{ env.PY }}' }
+      - uses: actions/cache/restore@v4
+        with: { path: ckpt, key: 'nemo-unified-${{ env.NEMO_REV }}', enableCrossOsArchive: true, fail-on-cache-miss: true }
+      - uses: actions/cache/restore@v4
+        with: { path: nemo-venv, key: 'nemo-site-${{ runner.os }}-${{ env.PY }}-${{ env.NEMO_SPEECH_SHA }}', fail-on-cache-miss: true }
+      - uses: actions/download-artifact@v4
+        with: { name: clips, path: clips }
+      - run: >-
+          PYTHONPATH=nemo-venv python verify/nemotron_unified/nemo_ref.py ckpt/nemotron-labs-unified-asr-0.6b.nemo
+          clips/manifest.jsonl alt-${{ matrix.part }}.jsonl --shard ${{ matrix.part }}/6 --kinds fleurs
+          --contexts '320c2:70,2,2;320l40:40,1,3;320l25:25,1,3'
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with: { name: 'nemo-alt-${{ matrix.part }}', path: 'alt-${{ matrix.part }}.jsonl', retention-days: 5 }
 
   nemo-long:
     if: inputs.only == '' || inputs.only == null || contains(format(',{0},', inputs.only), ',nemo-long,')
