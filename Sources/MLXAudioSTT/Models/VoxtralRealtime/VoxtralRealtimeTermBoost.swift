@@ -23,7 +23,10 @@ import Foundation
 //     neither, since a word's tokens can be spread over several steps.
 //
 // The same rules, measured on vLLM over 260 term-recall cases, gained 19 term
-// occurrences and lost none (localvoxtral #316).
+// occurrences and lost none (localvoxtral #316). On this decoder, 4-bit, over 90
+// cases (en and fr), the defaults below took term recall from 73.5% to 78.3% with
+// no false insertion and word error rate flat, and an unrelated list changed
+// nothing; 1.5/4/3 gained half as much, 3/5/6 started inserting terms.
 
 /// Bonus sizes for `VoxtralRealtimeStreamSession.setBoostTerms(_:config:)`, in logits.
 public struct VoxtralRealtimeTermBoostConfig: Sendable, Equatable {
@@ -35,7 +38,7 @@ public struct VoxtralRealtimeTermBoostConfig: Sendable, Equatable {
     /// can take its place.
     public var margin: Float
 
-    public init(firstTokenBoost: Float = 1.5, continuationBoost: Float = 4.0, margin: Float = 3.0) {
+    public init(firstTokenBoost: Float = 2.5, continuationBoost: Float = 4.0, margin: Float = 4.5) {
         self.firstTokenBoost = firstTokenBoost
         self.continuationBoost = continuationBoost
         self.margin = margin
