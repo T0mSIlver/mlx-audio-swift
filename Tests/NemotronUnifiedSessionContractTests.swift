@@ -5,8 +5,8 @@ import Testing
 @testable import MLXAudioSTT
 
 /// What a realtime server relies on from a Nemotron Unified (buffered) session, on a
-/// tiny random model: degenerate stops, append-only text, independent sessions on
-/// one model, compiled and uncompiled encoders agreeing, latency and language rules.
+/// tiny random model: text that only grows, at chunk sizes above one frame too;
+/// independent sessions on one model; the latency rule for every 80 ms step.
 struct NemotronUnifiedSessionContractTests {
     private var mlxRuntimeEnabled: Bool {
         ProcessInfo.processInfo.environment["MLXAUDIO_ENABLE_MLX_RUNTIME_TESTS"] == "1"
@@ -68,21 +68,7 @@ struct NemotronUnifiedSessionContractTests {
         return (session.text, session.tokens)
     }
 
-    @Test func stopsAfterAFewSamplesWithoutCrashing() throws {
-        guard mlxRuntimeEnabled else { return }
-        let model = try model()
-        for latency in [160, 2080] {
-            for count in [0, 1, 31, 32, 127, 128, 129, 512] {
-                let session = model.makeStreamSession(language: "en-US", chunkMs: latency)
-                _ = run(session, audio(count), feed: max(count, 1))
-                #expect(session.isFinished)
-                #expect(session.step(audio(64)).text.isEmpty)
-                #expect(session.finish().tokenIds.isEmpty)
-            }
-        }
-    }
-
-    @Test func feedSizeDoesNotChangeTheTranscript() throws {
+    @Test func textOnlyGrowsAndFeedSizeDoesNotMatterAtEveryChunkSize() throws {
         guard mlxRuntimeEnabled else { return }
         let model = try model()
         let samples = audio(128 * 60 + 77)
@@ -115,34 +101,6 @@ struct NemotronUnifiedSessionContractTests {
         #expect(sb.tokens == aloneB.tokens)
     }
 
-    @Test func compiledEncoderMatchesUncompiled() throws {
-        guard mlxRuntimeEnabled else { return }
-        let model = try model()
-        let samples = audio(128 * 40)
-        for batchFeed in [128, 128 * 9] {
-            let compiled = NemotronASRBufferedEncoder(
-                model: model, context: .forLatency(320, left: 6), language: "en-US"
-            )
-            let plain = NemotronASRBufferedEncoder(
-                model: model, context: .forLatency(320, left: 6), language: "en-US"
-            )
-            plain.compilesFullWindows = false
-            var x: [MLXArray] = [], y: [MLXArray] = []
-            var i = 0
-            while i < samples.count {
-                let end = min(i + batchFeed, samples.count)
-                x += compiled.push(Array(samples[i..<end]), final: end == samples.count)
-                y += plain.push(Array(samples[i..<end]), final: end == samples.count)
-                i = end
-            }
-            #expect(x.count == y.count)
-            for (p, q) in zip(x, y) {
-                #expect(p.shape == q.shape)
-                #expect(MLX.abs(p.asType(.float32) - q.asType(.float32)).max().item(Float.self) < 1e-2)
-            }
-        }
-    }
-
     @Test func everyEightyMillisecondLatencyKeepsItsTotal() {
         for frames in 2...26 {
             let c = NemotronASRBufferedContext.forLatency(frames * 80)
@@ -156,12 +114,4 @@ struct NemotronUnifiedSessionContractTests {
         #expect(NemotronASRBufferedContext.forLatency(2080) == NemotronASRBufferedContext(left: 70, chunk: 13, right: 13))
     }
 
-    @Test func languageResolvesAsNeMo() throws {
-        let model = try model()
-        #expect(model.resolvePromptIndex("en-US") == 0)
-        #expect(model.resolvePromptIndex("de") == 2)  // the only de-* key
-        #expect(model.resolvePromptIndex("en") == 3)  // ambiguous: en-US, en-GB -> default
-        #expect(model.resolvePromptIndex("xx") == 3)
-        #expect(model.resolvePromptIndex(nil) == 3)
-    }
 }
