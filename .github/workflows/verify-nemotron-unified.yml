@@ -16,6 +16,9 @@ on:
       kinds:
         description: 'Clip kinds for the Swift job (comma list); empty = all'
         default: ''
+      contexts:
+        description: 'Extra Swift buffer layouts, name:left,chunk,right;... (on clips that have 320 ms)'
+        default: ''
       quants:
         description: 'JSON list of quantizations for the py and swift jobs, in order'
         default: '["bf16","8bit","fp32","4bit"]'
