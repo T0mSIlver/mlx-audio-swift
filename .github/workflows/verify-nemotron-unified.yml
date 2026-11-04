@@ -284,6 +284,17 @@ jobs:
           -only-testing:'MLXAudioTests/NemotronUnifiedSessionContractTests' -only-testing:'MLXAudioTests/NemotronASRTests'
           MACOSX_DEPLOYMENT_TARGET=14.0 CODE_SIGNING_ALLOWED=NO COMPILER_INDEX_STORE_ENABLE=NO
           | tee contract-test.log; ! grep -q "Skipping Nemotron ASR MLX runtime test" contract-test.log
+      - name: NeMo token parity test (fp32 weights)
+        if: always() && matrix.quant == 'fp32'
+        shell: bash
+        env:
+          TEST_RUNNER_MLXAUDIO_ENABLE_MLX_RUNTIME_TESTS: '1'
+          TEST_RUNNER_NEMOTRON_UNIFIED_MLX_PATH: ${{ github.workspace }}/model
+        run: >-
+          xcodebuild test-without-building -scheme MLXAudio-Package -destination 'platform=macOS'
+          -derivedDataPath "$RUNNER_TEMP/DerivedData" -clonedSourcePackagesDirPath "$RUNNER_TEMP/SourcePackages"
+          -only-testing:'MLXAudioTests/NemotronUnifiedNeMoParityTests'
+          MACOSX_DEPLOYMENT_TARGET=14.0 CODE_SIGNING_ALLOWED=NO COMPILER_INDEX_STORE_ENABLE=NO
       - uses: actions/upload-artifact@v4
         if: always()
         with: { name: 'swift-${{ matrix.quant }}', path: 'swift-${{ matrix.quant }}.jsonl', retention-days: 5 }
