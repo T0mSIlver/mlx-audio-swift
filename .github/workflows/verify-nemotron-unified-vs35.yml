@@ -51,7 +51,7 @@ jobs:
           py/bin/python -c "from huggingface_hub import snapshot_download as d; print(d('$Q8_REPO', revision='$Q8_REV', local_dir='unified')); print(d('$R35_REPO', local_dir='r35'))"
           py/bin/python -c "from huggingface_hub import HfApi; print('3.5 revision', HfApi().model_info('$R35_REPO').sha)"
       - name: Unified vs 3.5
-        run: py/bin/python verify/nemotron_unified/vs35.py clips/manifest.jsonl vs35.json unified-8bit=unified nemotron35-8bit=r35
+        run: py/bin/python verify/nemotron_unified/vs35.py clips/manifest.jsonl vs35.json unified-8bit=unified@320 nemotron35-8bit=r35@320,560,1120
       - uses: actions/upload-artifact@v4
         if: always()
         with: { name: vs35, path: vs35.json, retention-days: 30 }
