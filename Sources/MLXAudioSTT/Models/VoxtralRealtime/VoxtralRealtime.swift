@@ -470,6 +470,22 @@ extension VoxtralRealtimeModel {
         tokenizer?.tokenBytes(for: tokenId) ?? []
     }
 
+    /// A booster for `terms`, built with this model's tokenizer; nil without a
+    /// tokenizer or when no term yields a token.
+    func makeTermBooster(
+        terms: [String], config boostConfig: VoxtralRealtimeTermBoostConfig
+    ) -> VoxtralRealtimeTermBooster? {
+        guard let tokenizer else { return nil }
+        return VoxtralRealtimeTermBooster(
+            terms: terms,
+            encode: { tokenizer.encode($0) },
+            startsWithSpace: { tokenizer.tokenBytes(for: $0).first == UInt8(ascii: " ") },
+            padToken: config.streamingPadTokenId,
+            firstTextToken: tokenizer.nSpecial,
+            config: boostConfig
+        )
+    }
+
     /// Evaluates what `readToken` needs. At temperature 0 that is the argmax, so each
     /// token syncs once and the full-vocab logits are not kept.
     func evalPrediction(_ logits: MLXArray, temperature: Float) -> MLXArray {
