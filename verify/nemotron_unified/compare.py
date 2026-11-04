@@ -67,13 +67,13 @@ def main():
             for key in ("session_text", "delta_text"):
                 if key in r and r[key].strip() != (r.get("text") or "").strip():
                     incons.append((cid, lat, key))
-            if row.get("text") and row["kind"] in ("fleurs", "long", "clipped", "padded", "music") and lat != "offline":
+            # WER on clips with a reference text and a NeMo result, so both columns count the same clips.
+            if row.get("text") and row["kind"] == "fleurs" and "nemo" in v and not v["nemo"].get("error"):
                 ref = norm_words(row["text"])
                 wer_impl[lat][0] += edits(norm_words(r.get("text")), ref)
                 wer_impl[lat][1] += len(ref)
-                if "nemo" in v:
-                    wer_nemo[lat][0] += edits(norm_words(v["nemo"]["text"]), ref)
-                    wer_nemo[lat][1] += len(ref)
+                wer_nemo[lat][0] += edits(norm_words(v["nemo"]["text"]), ref)
+                wer_nemo[lat][1] += len(ref)
             if "nemo" not in v or v["nemo"].get("error"):
                 continue
             n = v["nemo"]
@@ -102,9 +102,9 @@ def main():
             print(f"  latency {lat:>7}: text identical to NeMo {t[0]}/{t[1]}")
         print("  by kind: " + ", ".join(f"{k} {a}/{b}" for k, (a, b) in sorted(by_kind.items())))
         if wer_impl:
-            print("  WER vs FLEURS (port | NeMo): " + ", ".join(
-                f"{lat} {wer_impl[lat][0] / max(wer_impl[lat][1], 1):.3f} | {wer_nemo[lat][0] / max(wer_nemo[lat][1], 1):.3f}"
-                for lat in sorted(wer_impl, key=lambda x: int(x) if x.isdigit() else 0)))
+            print("  WER on the FLEURS clips (port | NeMo): " + ", ".join(
+                f"{lat} {wer_impl[lat][0] / max(wer_impl[lat][1], 1):.4f} | {wer_nemo[lat][0] / max(wer_nemo[lat][1], 1):.4f}"
+                for lat in sorted(wer_impl, key=lambda x: int(x) if x.isdigit() else -1)))
         print(f"  errors: {len(errs)} {errs[:6]}")
         print(f"  session/delta text != final text: {len(incons)} {incons[:6]}")
     print("\n== worst token disagreements (edit rate, impl, clip, latency, NeMo | port)")
