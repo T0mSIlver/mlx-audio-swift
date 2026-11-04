@@ -3893,6 +3893,46 @@ struct NemotronASRTests {
         #expect(!offlineIds.isEmpty)
         #expect(streamIds == offlineIds)
     }
+
+    /// The stream decode hands the booster each emitting frame's logits and emits
+    /// its choice; a list nothing in the vocabulary matches changes no token.
+    @Test func streamRNNTDecodeEmitsTheBoostersChoice() throws {
+        guard mlxRuntimeEnabled else {
+            print("Skipping Nemotron ASR MLX runtime test. Set MLXAUDIO_ENABLE_MLX_RUNTIME_TESTS=1 to enable.")
+            return
+        }
+        // Other suites run concurrently, so seed the tiny model's weights in a local RNG state.
+        let model = try withRandomState(MLXRandom.RandomState(seed: 0)) { try tinyModel() }
+        let values = moduloFloatFixtureValues(count: 1 * 128 * 16, multiplier: 7, modulus: 23, divisor: 23.0)
+        let mel = MLXArray(values).reshaped([1, 128, 16])
+        let prompted = model.applyPrompt(model.encoder(mel, attContextSize: [4, 1]).0, language: "en-US")
+        let world = try #require(model.vocabulary.firstIndex(of: "▁world"))
+        // Emissions that are not all "▁world", so a boost toward it has work to do.
+        try #require(try calibrateBlankBias(model, prompted) { run in
+            run.ids.contains(where: { $0 != world })
+        })
+
+        func decode(_ terms: [String]?, _ config: NemotronASRTermBoostConfig = .init()) -> NemotronASRStreamRNNTState {
+            let state = NemotronASRStreamRNNTState(blankToken: model.blankTokenID)
+            if let terms {
+                state.booster = NemotronASRTermBooster(
+                    terms: terms, vocabulary: model.vocabulary, blankToken: model.blankTokenID, config: config)
+            }
+            model.streamRNNTDecode(prompted, state: state, frameSeconds: 0.08)
+            return state
+        }
+
+        let reference = decode(nil)
+        let unmatched = decode(["zebra"])
+        #expect(unmatched.results.map(\.id) == reference.results.map(\.id))
+        #expect(unmatched.boostedTokenCount == 0)
+
+        // A bonus and margin past any logit gap: every emitted piece is the term's.
+        let forced = decode(["world"], .init(firstTokenBoost: 1e4, continuationBoost: 1e4, margin: 1e4))
+        #expect(!forced.results.isEmpty)
+        #expect(forced.results.allSatisfy { $0.id == world })
+        #expect(forced.boostedTokenCount > 0)
+    }
 }
 
 struct VoxtralRealtimeSTTTests {
