@@ -3,9 +3,13 @@ import Foundation
 struct VoxtralRealtimeTekkenFile: Decodable {
     struct Config: Decodable {
         let defaultNumSpecialTokens: Int?
+        let defaultVocabSize: Int?
+        let pattern: String?
 
         enum CodingKeys: String, CodingKey {
             case defaultNumSpecialTokens = "default_num_special_tokens"
+            case defaultVocabSize = "default_vocab_size"
+            case pattern
         }
     }
 
@@ -38,6 +42,9 @@ final class VoxtralRealtimeTokenizer {
     let specialIds: Set<Int>
 
     private var bytesCache: [Int: [UInt8]] = [:]
+    private let pattern: NSRegularExpression?
+    private let encodingVocabSize: Int
+    private var encodingRanks: [Data: Int]?
 
     init(tekkenURL: URL) throws {
         let data = try Data(contentsOf: tekkenURL)
@@ -45,6 +52,46 @@ final class VoxtralRealtimeTokenizer {
         vocab = parsed.vocab
         nSpecial = parsed.config?.defaultNumSpecialTokens ?? 1000
         specialIds = Set((parsed.specialTokens ?? []).compactMap { $0.rank })
+        encodingVocabSize = min(
+            vocab.count, (parsed.config?.defaultVocabSize ?? (vocab.count + nSpecial)) - nSpecial)
+        pattern = try parsed.config?.pattern.map { try NSRegularExpression(pattern: $0) }
+    }
+
+    /// Byte-level BPE encode, as upstream main's `TekkenTokenizer.encode` (measurement
+    /// branch only: 902920c predates it). Returns model token ids (rank + nSpecial).
+    func encode(_ text: String) -> [Int] {
+        if encodingRanks == nil {
+            encodingRanks = Dictionary(
+                uniqueKeysWithValues: vocab.prefix(encodingVocabSize).enumerated().compactMap {
+                    index, entry in
+                    Data(base64Encoded: entry.tokenBytes).map { ($0, index) }
+                })
+        }
+        let ranks = encodingRanks!
+        let pieces: [String]
+        if let pattern {
+            pieces = pattern.matches(in: text, range: NSRange(text.startIndex..., in: text))
+                .compactMap { Range($0.range, in: text).map { String(text[$0]) } }
+        } else {
+            pieces = [text]
+        }
+        return pieces.flatMap { piece -> [Int] in
+            let bytes = Data(piece.utf8)
+            if let rank = ranks[bytes] { return [rank + nSpecial] }
+            var parts = bytes.map { Data([$0]) }
+            while parts.count > 1 {
+                var best: (index: Int, rank: Int)?
+                for i in 0 ..< (parts.count - 1) {
+                    if let rank = ranks[parts[i] + parts[i + 1]], rank < (best?.rank ?? Int.max) {
+                        best = (i, rank)
+                    }
+                }
+                guard let best else { break }
+                parts[best.index].append(parts[best.index + 1])
+                parts.remove(at: best.index + 1)
+            }
+            return parts.compactMap { ranks[$0].map { $0 + nSpecial } }
+        }
     }
 
     static func fromModelDirectory(_ modelDir: URL) throws -> VoxtralRealtimeTokenizer {
