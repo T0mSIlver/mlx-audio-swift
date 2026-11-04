@@ -139,15 +139,27 @@ final class NemotronASRBufferedEncoder {
                 j += 1
             }
             let group = windows[i..<j]
+            let t0 = CFAbsoluteTimeGetCurrent()
             let mels = MLX.concatenated(group.map(mel), axis: 0)
+            if BufferedProfile.enabled { eval(mels) }
+            let t1 = CFAbsoluteTimeGetCurrent()
             let frames = Int32((windows[i].end - windows[i].start) / hop)
             let (encoded, _) = model.encoder(
                 mels.asType(model.computeDType),
                 lengths: MLXArray(Array(repeating: frames, count: group.count)),
                 attContextSize: context.asArray
             )
+            if BufferedProfile.enabled { eval(encoded) }
+            let t2 = CFAbsoluteTimeGetCurrent()
             let left = windows[i].left
             let prompted = model.applyPrompt(encoded[0..., left..<(left + context.chunk), 0...], language: language)
+            if BufferedProfile.enabled {
+                eval(prompted)
+                BufferedProfile.record(
+                    batch: group.count, frames: encoded.shape[1],
+                    mel: t1 - t0, encoder: t2 - t1, prompt: CFAbsoluteTimeGetCurrent() - t2
+                )
+            }
             for b in 0..<group.count {
                 outputs.append(prompted[b..<(b + 1)])
             }
@@ -197,5 +209,35 @@ extension NemotronASRModel {
 
     var encoderFrameSeconds: Double {
         Double(encoderConfig.subsamplingFactor * preprocessConfig.hopLength) / Double(preprocessConfig.sampleRate)
+    }
+}
+
+/// BENCH ONLY: `MLXAUDIO_NEMOTRON_PROFILE=1` evaluates each phase at its boundary and
+/// prints mean phase times to stderr every 100 windows.
+enum BufferedProfile {
+    static let enabled = ProcessInfo.processInfo.environment["MLXAUDIO_NEMOTRON_PROFILE"] == "1"
+    nonisolated(unsafe) static var n = 0
+    nonisolated(unsafe) static var calls = 0
+    nonisolated(unsafe) static var sums = (mel: 0.0, encoder: 0.0, prompt: 0.0)
+    nonisolated(unsafe) static var lastFrames = 0
+    nonisolated(unsafe) static var batches = 0
+
+    static func record(batch: Int, frames: Int, mel: Double, encoder: Double, prompt: Double) {
+        n += batch
+        calls += 1
+        batches += batch
+        lastFrames = frames
+        sums.mel += mel
+        sums.encoder += encoder
+        sums.prompt += prompt
+        if n >= 100 {
+            let c = Double(calls)
+            FileHandle.standardError.write(Data(String(
+                format: "NEMOTRON_PROFILE windows=%d passes=%d frames=%d mel_ms=%.2f encoder_ms=%.2f prompt_ms=%.2f per pass\n",
+                n, calls, lastFrames, sums.mel / c * 1000, sums.encoder / c * 1000, sums.prompt / c * 1000
+            ).utf8))
+            n = 0; calls = 0; batches = 0
+            sums = (0, 0, 0)
+        }
     }
 }

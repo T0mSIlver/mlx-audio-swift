@@ -391,8 +391,15 @@ public extension NemotronASRModel {
 
     static func fromDirectory(
         _ modelDir: URL,
-        computeDType: DType = .bfloat16
+        computeDType requestedDType: DType = .bfloat16
     ) throws -> NemotronASRModel {
+        // BENCH ONLY: MLXAUDIO_NEMOTRON_DTYPE=float16|float32 overrides the compute dtype.
+        let computeDType: DType
+        switch ProcessInfo.processInfo.environment["MLXAUDIO_NEMOTRON_DTYPE"] {
+        case "float16": computeDType = .float16
+        case "float32": computeDType = .float32
+        default: computeDType = requestedDType
+        }
         let configURL = modelDir.appendingPathComponent("config.json")
         let rawConfigData = try Data(contentsOf: configURL)
         let configData = normalizedConfigData(rawConfigData)
