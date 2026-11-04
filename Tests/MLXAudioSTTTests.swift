@@ -3536,6 +3536,17 @@ struct NemotronASRTests {
         #expect(booster.choose(logits: logits([6: 0, 4: -1]), greedy: 6) == 6)
     }
 
+    @Test func termBoostTreatsTheStartOfATranscriptAsAWordBoundary() throws {
+        // "aude" has no leading "▁"; first in a transcript it still starts the term.
+        let atStart = try #require(makeBooster(["aude"]))
+        #expect(atStart.choose(logits: logits([6: 0, 4: -1]), greedy: 6) == 4)
+        let midWord = try #require(
+            NemotronASRTermBooster(
+                terms: ["aude"], vocabulary: boostVocab, blankToken: boostBlank, config: .init(),
+                atWordBoundary: false))
+        #expect(midWord.choose(logits: logits([6: 0, 4: -1]), greedy: 6) == 6)
+    }
+
     @Test func termBoostWithNoUsableTermIsOff() {
         #expect(makeBooster([]) == nil)
         #expect(makeBooster(["  ", ""]) == nil)
