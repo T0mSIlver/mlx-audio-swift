@@ -1,0 +1,123 @@
+# Spike only (localvoxtral LVX-13, not for merge): LFM3-Audio-2B LiveASR against NeMo
+# Nemotron Unified 320 ms on the same public FLEURS English clips, plus an MLX probe.
+name: Verify LFM3 LiveASR
+
+on:
+  push:
+    branches: ['verify/lfm3-liveasr']
+  workflow_dispatch:
+
+env:
+  PY: '3.12'
+  LFM3_REV: 2d6c1f99c129b3ef07a8d168bc0ff08e2bdb93f1
+  LFM3_MLX_REV: cf555916a658f9db4baf84120b56b28807b2b53f
+  NEMO_REV: 023ce907267a09a308a5cb69239447cb3d0c1597
+  NEMO_SPEECH_SHA: 0c7af3351eb73ec7ad566f770623023e71187c92
+
+jobs:
+  clips:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: { python-version: '${{ env.PY }}' }
+      - run: pip install -q huggingface_hub soundfile scipy numpy
+      - run: python verify/lfm3_liveasr/clips_en.py clips --n 60
+      - uses: actions/upload-artifact@v4
+        with: { name: clips, path: clips, retention-days: 7 }
+
+  lfm3:
+    needs: clips
+    runs-on: ubuntu-latest
+    timeout-minutes: 240
+    strategy:
+      fail-fast: false
+      matrix: { part: [0, 1, 2, 3] }
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: { python-version: '${{ env.PY }}' }
+      - run: |
+          pip install -q torch --index-url https://download.pytorch.org/whl/cpu
+          pip install -q "transformers>=5.20.2" accelerate librosa soundfile
+          python -c "import torch, transformers; print(torch.__version__, transformers.__version__)"
+      - uses: actions/download-artifact@v4
+        with: { name: clips, path: clips }
+      - run: python verify/lfm3_liveasr/lfm3_live.py clips/manifest.jsonl lfm3-${{ matrix.part }}.jsonl --shard ${{ matrix.part }}/4 --rev $LFM3_REV
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with: { name: 'lfm3-${{ matrix.part }}', path: 'lfm3-${{ matrix.part }}.jsonl', retention-days: 7 }
+
+  nemo:
+    needs: clips
+    runs-on: ubuntu-latest
+    timeout-minutes: 300
+    strategy:
+      fail-fast: false
+      matrix: { part: [0, 1, 2] }
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: { python-version: '${{ env.PY }}' }
+      - run: |
+          pip install -q huggingface_hub
+          python -c "from huggingface_hub import hf_hub_download as d; d('nvidia/nemotron-labs-unified-asr-0.6b', 'nemotron-labs-unified-asr-0.6b.nemo', revision='$NEMO_REV', local_dir='ckpt')"
+          pip install -q torch torchaudio --index-url https://download.pytorch.org/whl/cpu
+          pip install -q "nemo-toolkit[asr] @ git+https://github.com/NVIDIA-NeMo/Speech.git@${NEMO_SPEECH_SHA}"
+      - uses: actions/download-artifact@v4
+        with: { name: clips, path: clips }
+      - run: >-
+          python verify/nemotron_unified/nemo_ref.py ckpt/nemotron-labs-unified-asr-0.6b.nemo
+          clips/manifest.jsonl nemo-${{ matrix.part }}.jsonl --shard ${{ matrix.part }}/3 --latencies 320
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with: { name: 'nemo-${{ matrix.part }}', path: 'nemo-${{ matrix.part }}.jsonl', retention-days: 7 }
+
+  mlx:
+    needs: clips
+    runs-on: macos-15
+    timeout-minutes: 90
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: { python-version: '${{ env.PY }}' }
+      - run: pip install -q -U "mlx-vlm>=0.7.11" && pip show mlx-vlm mlx | grep -E '^(Name|Version)'
+      - name: Does mlx-vlm have a live ASR path?
+        run: |
+          site=$(python -c "import mlx_vlm, os; print(os.path.dirname(mlx_vlm.__file__))")
+          grep -rIl -i "transcribe_live\|live asr\|liveasr" "$site" || echo "no live ASR code in mlx_vlm"
+          ls "$site/models" | grep -i lfm || echo "no lfm model dir"
+      - uses: actions/download-artifact@v4
+        with: { name: clips, path: clips }
+      - name: Offline ASR on 10 clips, M1 runner timing
+        run: |
+          python - <<'PY'
+          import json, subprocess, time
+          rows = [json.loads(l) for l in open("clips/manifest.jsonl")][:10]
+          out = open("mlx-offline.jsonl", "w")
+          for r in rows:
+              t0 = time.time()
+              p = subprocess.run(["python", "-m", "mlx_vlm.generate", "--model", "LiquidAI/LFM3-Audio-2B-MLX-4bit",
+                                  "--revision", "${{ env.LFM3_MLX_REV }}",
+                                  "--system", "Perform ASR in English.", "--prompt", "", "--audio", "clips/" + r["file"],
+                                  "--temperature", "0", "--max-tokens", "512"], capture_output=True, text=True)
+              print(r["id"], r["seconds"], "s audio,", round(time.time() - t0, 1), "s wall, rc", p.returncode, flush=True)
+              print(p.stdout[-1500:], p.stderr[-800:], flush=True)
+              out.write(json.dumps({"id": r["id"], "impl": "mlx-offline-raw", "stdout": p.stdout[-4000:],
+                                    "rc": p.returncode, "wall_s": round(time.time() - t0, 2)}) + "\n")
+          PY
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with: { name: mlx, path: mlx-offline.jsonl, retention-days: 7 }
+
+  score:
+    needs: [lfm3, nemo]
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with: { path: results }
+      - run: python verify/lfm3_liveasr/score.py results | tee -a "$GITHUB_STEP_SUMMARY"
