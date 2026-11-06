@@ -110,6 +110,8 @@ public final class VoxtralRealtimeStreamSession {
     private var promptLength = 0
     private var prefilled = false
     private var done = false
+    /// `finish(stopAfterSilentTail:)` ended the decode before the end of the pad.
+    private var tailStopped = false
 
     private var generated: [Int] = []
     private var transcript = VoxtralRealtimeTranscriptText()
@@ -162,13 +164,21 @@ public final class VoxtralRealtimeStreamSession {
 
     /// Flush the tail: reproduces the offline zero-pad so the final transcript equals
     /// `generate(...)`. Call once after the last `step`.
+    ///
+    /// The pad is `(delay + 1) + 10` tokens, and unless EOS comes first the flush
+    /// decodes every one of them: 18 decoder steps at a 480 ms delay.
+    /// `stopAfterSilentTail` ends it early instead: once the decoder is past the last
+    /// real audio token by the transcription delay, it stops after that many streaming
+    /// pad tokens in a row. The pad's remaining tokens then decode no further, so a
+    /// word they would still have produced is lost; nil (the default) decodes the whole
+    /// pad, as offline.
     @discardableResult
-    public func finish() -> Delta {
-        advance(final: true)
+    public func finish(stopAfterSilentTail silentTokens: Int? = nil) -> Delta {
+        advance(final: true, silentTail: silentTokens.map { max(1, $0) })
     }
 
-    private func advance(final: Bool) -> Delta {
-        guard !done else { return Delta(text: "", tokenIds: []) }
+    private func advance(final: Bool, silentTail: Int? = nil) -> Delta {
+        guard !done, !tailStopped else { return Delta(text: "", tokenIds: []) }
         if flushed {
             pendingSamples.removeAll()   // the final pad sealed the stream
             guard final else { return Delta(text: "", tokenIds: []) }
@@ -248,9 +258,13 @@ public final class VoxtralRealtimeStreamSession {
             return Delta(text: "", tokenIds: [])
         }
         prefillIfNeeded(adapter: adapter)
+        // The token read at position p saw adapter rows below p, and the model emits a
+        // row's text `nDelayTokens` later: from `realRegion + nDelayTokens` on, every
+        // real row has had its delay.
         let delta = decode(
             adapter: adapter,
-            upTo: min(emitLimit, adapterRowsDropped + adapter.shape[0])
+            upTo: min(emitLimit, adapterRowsDropped + adapter.shape[0]),
+            silentTail: final ? silentTail.map { (from: realRegion + nDelayTokens, padTokens: $0) } : nil
         )
 
         // Per-step clears re-allocate the working set cold 10x/s and defeat the
@@ -323,11 +337,16 @@ public final class VoxtralRealtimeStreamSession {
         prefilled = true
     }
 
-    private func decode(adapter: MLXArray, upTo emitLimit: Int) -> Delta {
+    private func decode(
+        adapter: MLXArray,
+        upTo emitLimit: Int,
+        silentTail: (from: Int, padTokens: Int)? = nil
+    ) -> Delta {
         guard prefilled else { return Delta(text: "", tokenIds: []) }
 
         let deltaStart = transcript.mark
         var newIds: [Int] = []
+        var silentRun = 0
         // Mirrors the offline `generate` loop exactly (append → check → pop trailing
         // EOS) so the streamed token stream is identical at temperature 0.
         while decPos < emitLimit {
@@ -345,6 +364,14 @@ public final class VoxtralRealtimeStreamSession {
                 break
             }
             newIds.append(token)
+            if let silentTail, decPos >= silentTail.from {
+                silentRun = token == model.config.streamingPadTokenId ? silentRun + 1 : 0
+                if silentRun >= silentTail.padTokens {
+                    // `pendingPrediction` is spent: no later call may read it.
+                    tailStopped = true
+                    break
+                }
+            }
 
             let tokenEmbed = model.decoder.embedToken(tokenId: token)
             let inputEmbed = decPos < adapterRowsDropped + adapter.shape[0]
