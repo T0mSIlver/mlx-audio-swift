@@ -33,6 +33,9 @@ final class NemotronASRStreamRNNTState {
     var lastToken: Int
     var decoderState: NemoLSTMState?
     var globalTime = 0  // absolute subsampled-frame index, for token timestamps
+    var booster: NemotronASRHotwordBooster?
+    /// Tokens the hotword boost chose over the unbiased argmax.
+    var boostedTokenCount = 0
 
     // The prediction network output depends only on (lastToken, decoderState),
     // which change only on emission. Blank frames reuse it, along with the
@@ -115,7 +118,19 @@ extension NemotronASRModel {
                 spec = MLX.concatenated(picks, axis: 0).asType(.int32).asArray(Int32.self).map { Int($0) }
                 specStart = time
             }
-            let token = spec[time - specStart]
+            var token = spec[time - specStart]
+            if let booster = state.booster, token != blankTokenID {
+                // Only a frame that emits pays for its logits: as in NeMo's greedy
+                // boosting, the unbiased argmax decides blank or not, and the boost
+                // picks which token is emitted.
+                let greedy = token
+                let logits = joint.combine(joint.enc(frame), prediction.predProjected)
+                token = booster.choose(
+                    logits: logits.reshaped([-1]).asType(.float32).asArray(Float.self),
+                    greedy: greedy
+                )
+                if token != greedy { state.boostedTokenCount += 1 }
+            }
             let step = NemoDecodingLogic.rnntStep(
                 predictedToken: token,
                 blankToken: blankTokenID,
@@ -128,6 +143,7 @@ extension NemotronASRModel {
                 state.decoderState = prediction.proposedState
                 state.cachedPrediction = nil
                 spec = []
+                state.booster?.accept(token)
                 if !NemotronASRTokenizer.isSpecialToken(token, vocabulary: vocabulary) {
                     state.results.append(
                         NemoAlignedToken(
@@ -177,13 +193,21 @@ public final class NemotronASRStreamSession {
         model: NemotronASRModel,
         language: String?,
         chunkFrames: Int?,
-        bufferedContext: NemotronASRBufferedContext? = nil
+        bufferedContext: NemotronASRBufferedContext? = nil,
+        hotwords: [String] = [],
+        hotwordsConfig: NemotronASRHotwordsConfig = .init()
     ) {
         self.model = model
         self.language = language
         self.chunkFrames = chunkFrames
         self.encState = NemotronASRStreamEncoderState(layers: model.encoder.layers.count)
         self.rnntState = NemotronASRStreamRNNTState(blankToken: model.blankTokenID)
+        rnntState.booster = NemotronASRHotwordBooster(
+            hotwords: hotwords,
+            vocabulary: model.vocabulary,
+            blankToken: model.blankTokenID,
+            config: hotwordsConfig
+        )
         self.melBasis = NemotronASRAudio.MelBasis(config: model.preprocessConfig)
         self.frameSeconds = model.encoderFrameSeconds
         if model.isBuffered {
@@ -220,6 +244,8 @@ public final class NemotronASRStreamSession {
     public var tokens: [Int] { rnntState.results.map { $0.id } }
     /// Whether `finish()` has been called.
     public var isFinished: Bool { done }
+    /// Tokens the hotword boost chose over the unbiased argmax so far.
+    public var boostedTokenCount: Int { rnntState.boostedTokenCount }
 
     /// Ingest a chunk of 16 kHz mono samples; returns the text decoded by this call.
     @discardableResult
@@ -383,9 +409,13 @@ public extension NemotronASRModel {
     ///     latency at a modest WER cost — see the model card's chunk-size table.
     ///     For a Unified checkpoint it is the latency (chunk + right context), 160-2080
     ///     ms; see `NemotronASRBufferedContext.forLatency`.
+    ///   - hotwords: words to boost while decoding, with NeMo's word boosting (see
+    ///     `NemotronASRHotwordsConfig`); empty leaves decoding unchanged.
     func makeStreamSession(
         language: String? = nil,
-        chunkMs: Int? = nil
+        chunkMs: Int? = nil,
+        hotwords: [String] = [],
+        hotwordsConfig: NemotronASRHotwordsConfig = .init()
     ) -> NemotronASRStreamSession {
         let chunkFrames: Int?
         if let chunkMs {
@@ -395,7 +425,10 @@ public extension NemotronASRModel {
         } else {
             chunkFrames = nil
         }
-        return NemotronASRStreamSession(model: self, language: language, chunkFrames: chunkFrames)
+        return NemotronASRStreamSession(
+            model: self, language: language, chunkFrames: chunkFrames,
+            hotwords: hotwords, hotwordsConfig: hotwordsConfig
+        )
     }
 
     /// Unified checkpoints only: stream with an explicit buffer layout in 80 ms encoder
@@ -404,11 +437,14 @@ public extension NemotronASRModel {
     /// Throws `NemotronASRStreamingError.notBuffered` for a cache-aware checkpoint.
     func makeStreamSession(
         language: String? = nil,
-        bufferedContext: NemotronASRBufferedContext
+        bufferedContext: NemotronASRBufferedContext,
+        hotwords: [String] = [],
+        hotwordsConfig: NemotronASRHotwordsConfig = .init()
     ) throws -> NemotronASRStreamSession {
         guard isBuffered else { throw NemotronASRStreamingError.notBuffered }
         return NemotronASRStreamSession(
-            model: self, language: language, chunkFrames: nil, bufferedContext: bufferedContext
+            model: self, language: language, chunkFrames: nil, bufferedContext: bufferedContext,
+            hotwords: hotwords, hotwordsConfig: hotwordsConfig
         )
     }
 

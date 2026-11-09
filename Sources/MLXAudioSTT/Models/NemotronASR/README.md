@@ -25,6 +25,16 @@ Supported repositories:
 
 The implementation supports the NeMo prompt-conditioned and English-only RNN-T layouts: causal FastConformer encoder, chunked-limited relative attention, optional language prompt conditioning, and greedy RNN-T decoding.
 
+## Hotwords
+
+A stream session can boost a list of words or phrases in the greedy decoder, with NeMo's word boosting (its GPU phrase-boosting tree in shallow fusion). Nothing is retrained and the encoder is untouched.
+
+```swift
+let session = model.makeStreamSession(language: "en-US", chunkMs: 320, hotwords: ["Neywa Labs", "Nemotron"])
+```
+
+The unbiased argmax still decides whether a frame emits a token. On a frame that does, tokens that start or continue a hotword get NeMo's tree score times `NemotronASRHotwordsConfig.alpha` (NeMo's `boosting_tree_alpha`, default 1.0), and a token that breaks a partial match gives that match's score back. Matching ignores case and how the hotword is tokenized. An empty list leaves decoding unchanged; `boostedTokenCount` counts the tokens the boost changed.
+
 ## Nemotron Unified
 
 The same model type loads [`nvidia/nemotron-labs-unified-asr-0.6b`](https://huggingface.co/nvidia/nemotron-labs-unified-asr-0.6b) converted with mlx-audio's `nemotron_asr.convert` ([bf16](https://huggingface.co/mlx-community/nemotron-labs-unified-asr-0.6b-bf16), [8-bit](https://huggingface.co/mlx-community/nemotron-labs-unified-asr-0.6b-8bit), [4-bit](https://huggingface.co/mlx-community/nemotron-labs-unified-asr-0.6b-4bit)). Its encoder is non-causal, so it streams buffered: each step re-encodes left context + chunk + right context and keeps the chunk's frames, as NeMo's buffered streaming does.

@@ -3598,6 +3598,105 @@ struct NemotronASRTests {
         #expect(NemotronASRTokenizer.detectedLanguage(tokens: [1, 2, 3], vocabulary: vocab) == "en-US")
     }
 
+    // MARK: Hotwords (Metal-free: the booster only sees plain logits)
+
+    private let hotwordVocab = ["<unk>", "<en-US>", "▁hello", "▁cl", "aude", "▁Cla", "ude", "▁", "cl", "▁code"]
+    private var hotwordBlank: Int { hotwordVocab.count }
+
+    private func hotwordLogits(_ pairs: [Int: Float]) -> [Float] {
+        var values = [Float](repeating: -10, count: hotwordVocab.count + 1)
+        for (id, value) in pairs { values[id] = value }
+        return values
+    }
+
+    private func hotwordBooster(_ hotwords: [String], alpha: Float = 1) throws -> NemotronASRHotwordBooster {
+        try #require(NemotronASRHotwordBooster(
+            hotwords: hotwords, vocabulary: hotwordVocab, blankToken: hotwordBlank, config: .init(alpha: alpha)))
+    }
+
+    private func hotwordScore(_ booster: NemotronASRHotwordBooster, _ token: Int) -> Float {
+        let (unmatched, tokens) = booster.scores()
+        return tokens[token] ?? unmatched
+    }
+
+    private func approx(_ a: Float, _ b: Double) -> Bool { abs(Double(a) - b) < 1e-5 }
+
+    @Test func hotwordsPhraseStartTakesContextScoreTimesAlpha() throws {
+        let booster = try hotwordBooster(["Claude"], alpha: 1.5)
+        #expect(approx(hotwordScore(booster, 3), 1.5))  // "▁cl"
+        #expect(hotwordScore(booster, 2) == 0)  // "▁hello"
+        #expect(booster.choose(logits: hotwordLogits([2: 2.0, 3: 0.6]), greedy: 2) == 3)
+        #expect(booster.choose(logits: hotwordLogits([2: 2.0, 3: 0.4]), greedy: 2) == 2)
+    }
+
+    @Test func hotwordsDeeperTokensFollowNeMoDepthScaling() throws {
+        let booster = try hotwordBooster(["claude code"], alpha: 2)
+        booster.accept(3)  // "▁cl"
+        #expect(approx(hotwordScore(booster, 4), 2 * (2 + log(2.0))))
+        booster.accept(4)  // "aude"
+        #expect(approx(hotwordScore(booster, 9), 2 * (2 + log(3.0))))
+    }
+
+    @Test func hotwordsBreakingAPartialMatchGivesItsScoreBack() throws {
+        let booster = try hotwordBooster(["claude code"])
+        booster.accept(3)
+        #expect(approx(hotwordScore(booster, 2), -1))
+        booster.accept(4)
+        #expect(approx(hotwordScore(booster, 2), -(1 + 2 + log(2.0))))
+        booster.accept(2)  // "▁hello" breaks it: back at the root
+        let (unmatched, tokens) = booster.scores()
+        #expect(unmatched == 0 && tokens == [3: 1, 5: 1, 7: 0])
+    }
+
+    @Test func hotwordsCompletedPhraseBacksOffAtNoCost() throws {
+        let booster = try hotwordBooster(["claude", "claude code"])
+        booster.accept(3)
+        booster.accept(4)
+        #expect(hotwordScore(booster, 2) == 0)
+        #expect(approx(hotwordScore(booster, 9), 2 + log(3.0)))
+    }
+
+    @Test func hotwordsMatchAnyTokenizationAndCasing() throws {
+        let booster = try hotwordBooster(["CLAUDE"])
+        #expect(approx(hotwordScore(booster, 5), 1))  // "▁Cla"
+        booster.accept(5)
+        #expect(approx(hotwordScore(booster, 6), 2 + log(2.0)))  // "ude"
+    }
+
+    @Test func hotwordsStartOnlyAtAWordBoundary() throws {
+        let booster = try hotwordBooster(["Claude"])
+        // At the start of a transcript a piece without "▁" still starts a word.
+        #expect(approx(hotwordScore(booster, 8), 1))
+        booster.accept(2)
+        #expect(hotwordScore(booster, 8) == 0)
+        // A bare "▁" moves the match along without depth or score of its own.
+        #expect(hotwordScore(booster, 7) == 0)
+        booster.accept(7)
+        #expect(approx(hotwordScore(booster, 8), 1))
+    }
+
+    @Test func hotwordsNeverBoostBlankFramesOrBlank() throws {
+        let booster = try hotwordBooster(["Claude"], alpha: 100)
+        #expect(booster.choose(logits: hotwordLogits([hotwordBlank: 5, 3: 4.9]), greedy: hotwordBlank) == hotwordBlank)
+        #expect(booster.choose(logits: hotwordLogits([hotwordBlank: 5, 2: 5.1]), greedy: 2) == 3)
+    }
+
+    @Test func hotwordsLanguageTagLeavesTheMatchesAlone() throws {
+        let booster = try hotwordBooster(["Claude"])
+        booster.accept(3)
+        let before = booster.scores()
+        booster.accept(1)  // "<en-US>"
+        let after = booster.scores()
+        #expect(before.unmatched == after.unmatched && before.tokens == after.tokens)
+    }
+
+    @Test func hotwordsEmptyListTurnsBoostingOff() {
+        for hotwords in [[], ["", "  "]] as [[String]] {
+            #expect(NemotronASRHotwordBooster(
+                hotwords: hotwords, vocabulary: hotwordVocab, blankToken: hotwordBlank, config: .init()) == nil)
+        }
+    }
+
     /// Synthetic 16 kHz waveform long enough to span several native chunks.
     private func syntheticAudio(samples: Int) -> MLXArray {
         let values = (0..<samples).map { i in
@@ -3831,6 +3930,47 @@ struct NemotronASRTests {
 
         #expect(!offlineIds.isEmpty)
         #expect(streamIds == offlineIds)
+    }
+
+    /// The stream decode hands the booster each emitting frame's logits and emits
+    /// its choice; a list nothing in the vocabulary matches changes no token.
+    @Test func streamRNNTDecodeEmitsTheBoostersChoice() throws {
+        guard mlxRuntimeEnabled else {
+            print("Skipping Nemotron ASR MLX runtime test. Set MLXAUDIO_ENABLE_MLX_RUNTIME_TESTS=1 to enable.")
+            return
+        }
+        // Other suites run concurrently, so seed the tiny model's weights in a local RNG state.
+        let model = try withRandomState(MLXRandom.RandomState(seed: 0)) { try tinyModel() }
+        let values = moduloFloatFixtureValues(count: 1 * 128 * 16, multiplier: 7, modulus: 23, divisor: 23.0)
+        let mel = MLXArray(values).reshaped([1, 128, 16])
+        let prompted = model.applyPrompt(model.encoder(mel, attContextSize: [4, 1]).0, language: "en-US")
+        let world = try #require(model.vocabulary.firstIndex(of: "▁world"))
+        // Emissions that are not all "▁world", so a boost toward it has work to do.
+        try #require(try calibrateBlankBias(model, prompted) { run in
+            run.ids.contains(where: { $0 != world })
+        })
+
+        func decode(_ hotwords: [String]?, alpha: Float = 1) -> NemotronASRStreamRNNTState {
+            let state = NemotronASRStreamRNNTState(blankToken: model.blankTokenID)
+            if let hotwords {
+                state.booster = NemotronASRHotwordBooster(
+                    hotwords: hotwords, vocabulary: model.vocabulary, blankToken: model.blankTokenID,
+                    config: .init(alpha: alpha))
+            }
+            model.streamRNNTDecode(prompted, state: state, frameSeconds: 0.08)
+            return state
+        }
+
+        let reference = decode(nil)
+        let unmatched = decode(["zebra"])
+        #expect(unmatched.results.map(\.id) == reference.results.map(\.id))
+        #expect(unmatched.boostedTokenCount == 0)
+
+        // A weight past any logit gap: every emitted piece is the hotword's.
+        let forced = decode(["world"], alpha: 1e4)
+        #expect(!forced.results.isEmpty)
+        #expect(forced.results.allSatisfy { $0.id == world })
+        #expect(forced.boostedTokenCount > 0)
     }
 }
 
