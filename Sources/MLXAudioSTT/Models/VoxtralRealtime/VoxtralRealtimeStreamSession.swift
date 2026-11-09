@@ -150,8 +150,9 @@ public final class VoxtralRealtimeStreamSession {
     /// so are calls after the stream finished on EOS or `maxTokens`.
     @discardableResult
     public func step(_ samples: [Float]) -> Delta {
-        // Nothing reads samples buffered after the stream finished.
-        guard !done else { return Delta(text: "", tokenIds: []) }
+        // Nothing reads samples buffered after the stream finished or the flush
+        // stopped on a silent tail.
+        guard !done, !tailStopped else { return Delta(text: "", tokenIds: []) }
         pendingSamples.append(contentsOf: samples)
         return advance(final: false)
     }
