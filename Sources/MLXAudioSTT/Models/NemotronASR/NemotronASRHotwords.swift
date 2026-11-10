@@ -21,12 +21,13 @@ import Foundation
 //
 // Where this differs: NeMo builds its tree from one tokenization of each phrase.
 // There is no SentencePiece encoder here, so matching runs on the NFKC-normalized,
-// case-folded text each token appends ("▁" as a space), as Unicode scalars, the
-// same units as the Python port. Every tokenization and casing of a hotword is
-// boosted, and depth counts the tokens actually emitted, so a spelling in more
-// pieces collects more score than NeMo's single path would. A phrase starts only
-// at a word boundary (the start of the transcript counts), a bare "▁" moves a
-// match along without depth or score, and special tokens leave the matches alone.
+// lowercased text each token appends (one scalar at a time, final sigma as sigma;
+// "▁" as a space), as Unicode scalars, the same units as the Python port. Every
+// tokenization and upper/lower casing of a hotword is boosted, and depth counts the
+// tokens actually emitted, so a spelling in more pieces collects more score than
+// NeMo's single path would. A phrase starts only at a word boundary (the start of
+// the transcript counts), a bare "▁" moves a match along without depth or score,
+// and special tokens leave the matches alone.
 
 /// NeMo's `boosting_tree_alpha` defaults to 0 (off) and is tuned per dataset.
 public let nemotronASRDefaultHotwordsAlpha: Float = 1.0
