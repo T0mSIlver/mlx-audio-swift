@@ -21,7 +21,7 @@ import Foundation
 //
 // Where this differs: NeMo builds its tree from one tokenization of each phrase.
 // There is no SentencePiece encoder here, so matching runs on the NFKC-normalized,
-// lowercased text each token appends ("▁" as a space), as Unicode scalars, the
+// case-folded text each token appends ("▁" as a space), as Unicode scalars, the
 // same units as the Python port. Every tokenization and casing of a hotword is
 // boosted, and depth counts the tokens actually emitted, so a spelling in more
 // pieces collects more score than NeMo's single path would. A phrase starts only
@@ -59,15 +59,18 @@ final class NemotronASRHotwordBooster {
     private var chain: [Match]
     private var cachedScores: (unmatched: Float, tokens: [Int: Float])?
 
-    private static func normalized(_ string: String) -> String {
-        string.precomposedStringWithCompatibilityMapping.lowercased()
+    /// Lowercase one scalar at a time, with final sigma folded to sigma. A hotword
+    /// and the pieces that spell it must fold the same way, so casing cannot depend
+    /// on context: "ΟΣ".lowercased() ends in "ς" but the piece "Σ" lowers to "σ".
+    static func fold(_ string: String) -> String {
+        string.unicodeScalars.map { String($0).lowercased() }.joined().replacingOccurrences(of: "ς", with: "σ")
     }
 
     /// Returns nil when no hotword survives normalization.
     init?(hotwords: [String], vocabulary: [String], blankToken: Int, alpha: Float) {
         var keys = Set<Text>()
         for hotword in hotwords {
-            let words = Self.normalized(hotword).split(whereSeparator: { $0.isWhitespace })
+            let words = Self.fold(hotword.precomposedStringWithCompatibilityMapping).split(whereSeparator: { $0.isWhitespace })
             if !words.isEmpty { keys.insert(Array((" " + words.joined(separator: " ")).unicodeScalars)) }
         }
         guard !keys.isEmpty else { return nil }
@@ -78,7 +81,7 @@ final class NemotronASRHotwordBooster {
         var emittable = [Bool](repeating: false, count: vocabulary.count + 1)
         for (id, piece) in vocabulary.enumerated()
         where id != blankToken && !NemotronASRTokenizer.isSpecialToken(id, vocabulary: vocabulary) {
-            let text = Array(piece.replacingOccurrences(of: "▁", with: " ").lowercased().unicodeScalars)
+            let text = Array(Self.fold(piece.replacingOccurrences(of: "▁", with: " ")).unicodeScalars)
             guard !text.isEmpty else { continue }
             pieceIDs[text, default: []].append(id)
             emittable[id] = true
