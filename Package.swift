@@ -42,6 +42,10 @@ let package = Package(
             targets: ["mlx-audio-swift-tts"],
         ),
         .executable(
+            name: "qwen3tts-probe",
+            targets: ["qwen3tts-probe"],
+        ),
+        .executable(
             name: "mlx-audio-swift-codec",
             targets: ["mlx-audio-swift-codec"],
         ),
@@ -277,6 +281,11 @@ let package = Package(
             exclude: [
                 "README.md",
             ]
+        ),
+        .executableTarget(
+            name: "qwen3tts-probe",
+            dependencies: ["MLXAudioCore", "MLXAudioTTS"],
+            path: "Sources/Tools/qwen3tts-probe"
         ),
         .executableTarget(
             name: "mlx-audio-swift-codec",
