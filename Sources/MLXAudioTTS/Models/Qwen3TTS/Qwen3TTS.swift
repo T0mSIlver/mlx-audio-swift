@@ -389,12 +389,14 @@ public final class Qwen3TTSModel: Module, SpeechGenerationModel, @unchecked Send
         let startTime = Date()
         let cache = talker.makeCache()
         var generatedCodes = [MLXArray]()
-        var generatedCodebookTokens = [Int]()
         let eosTokenId = talkerConfig.codecEosTokenId
 
         // Suppress special tokens
-        let suppressTokens = (talkerConfig.vocabSize - 1024 ..< talkerConfig.vocabSize)
-            .filter { $0 != eosTokenId }
+        let vocabIds = MLXArray(Int32(0) ..< Int32(talkerConfig.vocabSize)).reshaped(1, -1)
+        let suppressMask = (vocabIds .>= Int32(talkerConfig.vocabSize - 1024)) .&& (vocabIds .!= Int32(eosTokenId))
+        // First-codebook tokens generated so far, kept on the GPU so the next
+        // step can be queued before this one is read back.
+        var penaltyMask: MLXArray? = repetitionPenalty != 1.0 ? vocabIds .< 0 : nil
 
         // Streaming decode state
         let codecTokenRateHz = 12.5
@@ -402,7 +404,6 @@ public final class Qwen3TTSModel: Module, SpeechGenerationModel, @unchecked Send
         var decodedTokens = 0
 
         var trailingIdx = 0
-        var inputEmbeds = inputEmbedsInit
         let eosTokenArray = MLXArray([Int32(eosTokenId)]).reshaped(1, 1)
         let codeCache = talker.codePredictor.makeCache()
 
@@ -418,8 +419,11 @@ public final class Qwen3TTSModel: Module, SpeechGenerationModel, @unchecked Send
             }
         }
 
-        for step in 0 ..< effectiveMaxTokens {
-            try Task.checkCancellation()
+        // Builds one frame: the talker step, the 15 residual codebooks and the
+        // next step's input. Nothing here reads a value back from the GPU.
+        func buildFrame(_ inputEmbeds: MLXArray) -> (
+            token: MLXArray, codes: MLXArray, isEOS: MLXArray, nextInput: MLXArray
+        ) {
             // Forward pass through talker
             let (logits, hidden) = talker(inputEmbeds, cache: cache)
 
@@ -430,13 +434,15 @@ public final class Qwen3TTSModel: Module, SpeechGenerationModel, @unchecked Send
                 topP: topP,
                 topK: topK,
                 repetitionPenalty: repetitionPenalty,
-                generatedTokens: generatedCodebookTokens,
-                suppressTokens: suppressTokens,
+                penaltyMask: penaltyMask,
+                suppressMask: suppressMask,
                 eosTokenId: eosTokenId,
                 minP: minP
             )
+            if let mask = penaltyMask {
+                penaltyMask = mask .|| (vocabIds .== nextToken)
+            }
 
-            // Defer sync to the eval boundary with inputEmbeds.
             let isEOS = nextToken .== eosTokenArray
 
             // Generate remaining codebook tokens with code predictor
@@ -486,16 +492,29 @@ public final class Qwen3TTSModel: Module, SpeechGenerationModel, @unchecked Send
                 codecEmbed = codecEmbed + talker.codePredictor.codecEmbedding[i](code)
             }
 
-            inputEmbeds = textEmbed + codecEmbed
-            eval(inputEmbeds, isEOS)
+            return (nextToken, allCodes, isEOS, textEmbed + codecEmbed)
+        }
 
-            let tokenId = Int(nextToken[0, 0].item(Int32.self))
+        var frame = buildFrame(inputEmbedsInit)
+        asyncEval(frame.nextInput, frame.codes, frame.isEOS)
+
+        for step in 0 ..< effectiveMaxTokens {
+            try Task.checkCancellation()
+
+            // Queue the next frame before reading this one back, so the GPU
+            // doesn't sit idle while the host builds the graph. After EOS, the
+            // queued frame is discarded.
+            let nextFrame = step + 1 < effectiveMaxTokens ? buildFrame(frame.nextInput) : nil
+            if let nextFrame {
+                asyncEval(nextFrame.nextInput, nextFrame.codes, nextFrame.isEOS)
+            }
+
+            let tokenId = Int(frame.token[0, 0].item(Int32.self))
             onToken?(tokenId)
-            if isEOS.item(Bool.self) {
+            if frame.isEOS.item(Bool.self) {
                 break
             }
-            generatedCodebookTokens.append(tokenId)
-            generatedCodes.append(allCodes)
+            generatedCodes.append(frame.codes)
 
             // Streaming: decode and yield audio chunks during generation
             if let onAudioChunk {
@@ -514,6 +533,9 @@ public final class Qwen3TTSModel: Module, SpeechGenerationModel, @unchecked Send
             if step > 0, step % 50 == 0 {
                 Memory.clearCache()
             }
+
+            guard let nextFrame else { break }
+            frame = nextFrame
         }
 
         try Task.checkCancellation()
@@ -1015,33 +1037,27 @@ public final class Qwen3TTSModel: Module, SpeechGenerationModel, @unchecked Send
         topP: Float = 1.0,
         topK: Int = 50,
         repetitionPenalty: Float = 1.0,
-        generatedTokens: [Int]? = nil,
-        suppressTokens: [Int]? = nil,
+        penaltyMask: MLXArray? = nil,
+        suppressMask: MLXArray? = nil,
         eosTokenId: Int? = nil,
         minP: Float = 0.0
     ) -> MLXArray {
         var logitsSlice = logits[0..., (-1)..., 0...].squeezed(axis: 1) // [batch, vocab_size]
 
         // Suppress tokens by setting to -inf
-        if let suppress = suppressTokens, !suppress.isEmpty {
-            let suppressArr = MLXArray(suppress.map { Int32($0) }).reshaped(1, -1)
-            let negInf = MLXArray.full([1, suppress.count], values: MLXArray(-Float.infinity), dtype: logitsSlice.dtype)
-            logitsSlice = putAlong(logitsSlice, suppressArr, values: negInf, axis: -1)
+        if let suppressMask {
+            let negInf = MLXArray(-Float.infinity).asType(logitsSlice.dtype)
+            logitsSlice = which(suppressMask, negInf, logitsSlice)
         }
 
-        // Repetition penalty
-        if let tokens = generatedTokens, !tokens.isEmpty, repetitionPenalty != 1.0 {
-            let unique = Array(Set(tokens)).filter { $0 < logitsSlice.dim(-1) }
-            if !unique.isEmpty {
-                let tokenIds = MLXArray(unique.map { Int32($0) }).reshaped(1, -1)
-                let selected = takeAlong(logitsSlice, tokenIds, axis: -1)
-                let penalized = which(
-                    selected .< 0,
-                    selected * repetitionPenalty,
-                    selected / repetitionPenalty
-                )
-                logitsSlice = putAlong(logitsSlice, tokenIds, values: penalized, axis: -1)
-            }
+        // Repetition penalty on the tokens set in `penaltyMask`
+        if let penaltyMask, repetitionPenalty != 1.0 {
+            let penalized = which(
+                logitsSlice .< 0,
+                logitsSlice * repetitionPenalty,
+                logitsSlice / repetitionPenalty
+            )
+            logitsSlice = which(penaltyMask, penalized, logitsSlice)
         }
 
         // Greedy if temperature 0
