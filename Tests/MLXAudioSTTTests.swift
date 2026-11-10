@@ -3600,7 +3600,9 @@ struct NemotronASRTests {
 
     // MARK: Hotwords (Metal-free: the booster only sees plain logits)
 
-    private let hotwordVocab = ["<unk>", "<en-US>", "▁hello", "▁cl", "aude", "▁Cla", "ude", "▁", "cl", "▁code", "▁red"]
+    private let hotwordVocab = [
+        "<unk>", "<en-US>", "▁hello", "▁cl", "aude", "▁Cla", "ude", "▁", "cl", "▁code", "▁red", "▁ΟΣ", "▁Ο", "Σ",
+    ]
     private var hotwordBlank: Int { hotwordVocab.count }
 
     private func hotwordLogits(_ pairs: [Int: Float]) -> [Float] {
@@ -3663,6 +3665,15 @@ struct NemotronASRTests {
         #expect(approx(hotwordScore(booster, 5), 1))  // "▁Cla"
         booster.accept(5)
         #expect(approx(hotwordScore(booster, 6), 2 + log(2.0)))  // "ude"
+    }
+
+    @Test(arguments: ["ΟΣ", "ος"])
+    func hotwordsFoldCasingTheSameAcrossATokenBoundary(_ hotword: String) throws {
+        // "ΟΣ".lowercased() ends in a final sigma, while the piece "Σ" alone lowers to "σ".
+        let booster = try hotwordBooster([hotword])
+        #expect(approx(hotwordScore(booster, 11), 1))  // "▁ΟΣ"
+        booster.accept(12)  // "▁Ο"
+        #expect(approx(hotwordScore(booster, 13), 2 + log(2.0)))  // "Σ"
     }
 
     @Test func hotwordsStartOnlyAtAWordBoundary() throws {
