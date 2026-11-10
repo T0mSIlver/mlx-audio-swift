@@ -63,6 +63,7 @@ for c in cases {
             case .audio(let a):
                 if firstChunk == nil { firstChunk = Date().timeIntervalSince(t0) }
                 chunks.append(a)
+            default: break
             }
         }
         let streamWall = Date().timeIntervalSince(t0)
