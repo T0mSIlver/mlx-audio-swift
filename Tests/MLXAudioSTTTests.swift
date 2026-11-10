@@ -3600,7 +3600,7 @@ struct NemotronASRTests {
 
     // MARK: Hotwords (Metal-free: the booster only sees plain logits)
 
-    private let hotwordVocab = ["<unk>", "<en-US>", "▁hello", "▁cl", "aude", "▁Cla", "ude", "▁", "cl", "▁code"]
+    private let hotwordVocab = ["<unk>", "<en-US>", "▁hello", "▁cl", "aude", "▁Cla", "ude", "▁", "cl", "▁code", "▁red"]
     private var hotwordBlank: Int { hotwordVocab.count }
 
     private func hotwordLogits(_ pairs: [Int: Float]) -> [Float] {
@@ -3611,7 +3611,7 @@ struct NemotronASRTests {
 
     private func hotwordBooster(_ hotwords: [String], alpha: Float = 1) throws -> NemotronASRHotwordBooster {
         try #require(NemotronASRHotwordBooster(
-            hotwords: hotwords, vocabulary: hotwordVocab, blankToken: hotwordBlank, config: .init(alpha: alpha)))
+            hotwords: hotwords, vocabulary: hotwordVocab, blankToken: hotwordBlank, alpha: alpha))
     }
 
     private func hotwordScore(_ booster: NemotronASRHotwordBooster, _ token: Int) -> Float {
@@ -3656,7 +3656,9 @@ struct NemotronASRTests {
         #expect(approx(hotwordScore(booster, 9), 2 + log(3.0)))
     }
 
-    @Test func hotwordsMatchAnyTokenizationAndCasing() throws {
+    @Test func hotwordsMatchAnyTokenizationCasingAndWidth() throws {
+        // Hotwords are NFKC-normalized, as SentencePiece pieces are.
+        #expect(approx(hotwordScore(try hotwordBooster(["Ｃｌａｕｄｅ"]), 3), 1))
         let booster = try hotwordBooster(["CLAUDE"])
         #expect(approx(hotwordScore(booster, 5), 1))  // "▁Cla"
         booster.accept(5)
@@ -3675,10 +3677,28 @@ struct NemotronASRTests {
         #expect(approx(hotwordScore(booster, 8), 1))
     }
 
+    @Test func hotwordsBrokenMatchBacksOffToTheShorterMatchInsideIt() throws {
+        let booster = try hotwordBooster(["claude code x", "code red"])
+        for token in [3, 4, 9] { booster.accept(token) }  // "▁cl", "aude", "▁code"
+        let collected = 1 + (2 + log(2.0)) + (2 + log(3.0))
+        // " claude code" fails over to " code", which "▁red" continues.
+        #expect(approx(hotwordScore(booster, 10), (1 - collected) + 2 + log(2.0)))
+        #expect(approx(hotwordScore(booster, 2), -collected))
+    }
+
     @Test func hotwordsNeverBoostBlankFramesOrBlank() throws {
-        let booster = try hotwordBooster(["Claude"], alpha: 100)
-        #expect(booster.choose(logits: hotwordLogits([hotwordBlank: 5, 3: 4.9]), greedy: hotwordBlank) == hotwordBlank)
-        #expect(booster.choose(logits: hotwordLogits([hotwordBlank: 5, 2: 5.1]), greedy: 2) == 3)
+        let strong = try hotwordBooster(["Claude"], alpha: 100)
+        #expect(strong.choose(logits: hotwordLogits([hotwordBlank: 5, 3: 4.9]), greedy: hotwordBlank) == hotwordBlank)
+        let booster = try hotwordBooster(["claude code"])
+        booster.accept(3)
+        booster.accept(4)
+        // Breaking the match costs "▁hello" 3.69, but blank is out of the re-argmax.
+        #expect(booster.choose(logits: hotwordLogits([hotwordBlank: 5, 2: 5.1]), greedy: 2) == 2)
+    }
+
+    @Test func hotwordsLeaveALanguageTagFrameAlone() throws {
+        let booster = try hotwordBooster(["Claude"])
+        #expect(booster.choose(logits: hotwordLogits([1: 1, 3: 0.5]), greedy: 1) == 1)
     }
 
     @Test func hotwordsLanguageTagLeavesTheMatchesAlone() throws {
@@ -3693,7 +3713,7 @@ struct NemotronASRTests {
     @Test func hotwordsEmptyListTurnsBoostingOff() {
         for hotwords in [[], ["", "  "]] as [[String]] {
             #expect(NemotronASRHotwordBooster(
-                hotwords: hotwords, vocabulary: hotwordVocab, blankToken: hotwordBlank, config: .init()) == nil)
+                hotwords: hotwords, vocabulary: hotwordVocab, blankToken: hotwordBlank, alpha: 1) == nil)
         }
     }
 
@@ -3955,7 +3975,7 @@ struct NemotronASRTests {
             if let hotwords {
                 state.booster = NemotronASRHotwordBooster(
                     hotwords: hotwords, vocabulary: model.vocabulary, blankToken: model.blankTokenID,
-                    config: .init(alpha: alpha))
+                    alpha: alpha)
             }
             model.streamRNNTDecode(prompted, state: state, frameSeconds: 0.08)
             return state

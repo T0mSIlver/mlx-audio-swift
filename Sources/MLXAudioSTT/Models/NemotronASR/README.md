@@ -33,7 +33,7 @@ A stream session can boost a list of words or phrases in the greedy decoder, wit
 let session = model.makeStreamSession(language: "en-US", chunkMs: 320, hotwords: ["Neywa Labs", "Nemotron"])
 ```
 
-The unbiased argmax still decides whether a frame emits a token. On a frame that does, tokens that start or continue a hotword get NeMo's tree score times `NemotronASRHotwordsConfig.alpha` (NeMo's `boosting_tree_alpha`, default 1.0), and a token that breaks a partial match gives that match's score back. Matching ignores case and how the hotword is tokenized. An empty list leaves decoding unchanged; `boostedTokenCount` counts the tokens the boost changed.
+The unbiased argmax still decides whether a frame emits a token. On a frame that does, tokens that start or continue a hotword get NeMo's tree score times `hotwordsAlpha` (NeMo's `boosting_tree_alpha`, default 1.0), and a token that breaks a partial match gives that match's score back. Matching ignores case and how the hotword is tokenized. An empty list leaves decoding unchanged; `boostedTokenCount` counts the tokens the boost changed.
 
 ## Nemotron Unified
 
