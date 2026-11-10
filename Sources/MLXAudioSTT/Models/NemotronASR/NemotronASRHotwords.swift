@@ -8,106 +8,106 @@ import Foundation
 //
 //   * The unbiased argmax decides blank or not. On a blank frame nothing changes;
 //     otherwise every non-blank token gets `alpha` times its tree score added to
-//     its logit and the argmax is taken again over non-blank tokens.
-//   * A token that starts a phrase scores `contextScore`; the token at depth
-//     d >= 1 of a match scores `contextScore * depthScaling + ln(d + 1)`.
+//     its logit and the argmax is taken again over non-blank tokens. A frame whose
+//     argmax is a special token, such as a language tag, is left alone too, and
+//     special tokens never take a frame from a text token.
+//   * A token that starts a phrase scores NeMo's `context_score` (1.0); the token
+//     at depth d >= 1 of a match scores `context_score * depth_scaling + ln(d + 1)`,
+//     with the `depth_scaling` NeMo recommends for RNN-T (2.0).
 //   * A token that breaks a partial match takes the failure arc, whose score gives
 //     back what the match had collected, so a wrong start costs its own bonus. A
 //     match that completed a phrase backs off at no cost. A token outside every
 //     phrase scores 0 (NeMo's `unk_score`).
 //
-// One difference: NeMo builds its tree from the tokenizer's ids for each phrase.
-// Here matching runs on the lowercased text a token appends ("▁" as a space), so
-// every tokenization and casing of a hotword is boosted, as NeMo's
-// `case_insensitive` mode intends, without needing a SentencePiece encoder. A
-// phrase starts only at a word boundary, and a bare "▁" piece moves a match along
-// without adding depth or score.
+// Where this differs: NeMo builds its tree from one tokenization of each phrase.
+// There is no SentencePiece encoder here, so matching runs on the NFKC-normalized,
+// lowercased text each token appends ("▁" as a space), as Unicode scalars, the
+// same units as the Python port. Every tokenization and casing of a hotword is
+// boosted, and depth counts the tokens actually emitted, so a spelling in more
+// pieces collects more score than NeMo's single path would. A phrase starts only
+// at a word boundary (the start of the transcript counts), a bare "▁" moves a
+// match along without depth or score, and special tokens leave the matches alone.
 
-/// Weights for hotword boosting in `NemotronASRModel.makeStreamSession(...)`.
-public struct NemotronASRHotwordsConfig: Sendable, Equatable {
-    /// NeMo's `boosting_tree_alpha`: the weight of the boosting tree's score.
-    public var alpha: Float
-    /// NeMo's `context_score`: the score of a phrase's first token.
-    public var contextScore: Float
-    /// NeMo's `depth_scaling`; NeMo recommends 2.0 for RNN-T.
-    public var depthScaling: Float
-
-    public init(alpha: Float = 1.0, contextScore: Float = 1.0, depthScaling: Float = 2.0) {
-        self.alpha = alpha
-        self.contextScore = contextScore
-        self.depthScaling = depthScaling
-    }
-}
+/// NeMo's `boosting_tree_alpha` defaults to 0 (off) and is tuned per dataset.
+public let nemotronASRDefaultHotwordsAlpha: Float = 1.0
 
 final class NemotronASRHotwordBooster {
+    private typealias Text = [Unicode.Scalar]
+
     private struct Match {
-        var text: String  // the phrase prefix the emitted text ends with
+        var text: Text  // the phrase prefix the emitted text ends with
         var depth: Int  // tokens it took, bare "▁" pieces excluded
         var score: Float  // tree score collected along the way, alpha included
     }
 
-    private static let root = Match(text: "", depth: 0, score: 0)
+    private static let contextScore: Float = 1.0
+    private static let depthScaling: Float = 2.0
+    private static let space: Unicode.Scalar = " "
+    private static let root = Match(text: [], depth: 0, score: 0)
 
-    let config: NemotronASRHotwordsConfig
-    private let blankToken: Int
-    private let keys: Set<String>
+    let alpha: Float
+    private let keys: Set<Text>
     /// Token ids by the lowercased text they append, specials and blank left out.
-    private let pieceIDs: [String: [Int]]
-    private let emittable: Set<Int>
-    /// Tokens whose text has a letter, digit or mark, not only spaces.
+    private let pieceIDs: [Text: [Int]]
+    /// Whether a token can take a frame: false for blank and special tokens.
+    private let emittable: [Bool]
+    /// Tokens whose text has something besides spaces.
     private let textPieces: Set<Int>
     private let maxPieceLength: Int
-    private var extensionsCache: [String: [(token: Int, text: String)]] = [:]
+    private var extensionsCache: [Text: [(token: Int, text: Text)]] = [:]
     /// Matches under way, longest first: NeMo's failure chain. The root is implicit.
     private var chain: [Match]
     private var cachedScores: (unmatched: Float, tokens: [Int: Float])?
 
+    private static func normalized(_ string: String) -> String {
+        string.precomposedStringWithCompatibilityMapping.lowercased()
+    }
+
     /// Returns nil when no hotword survives normalization.
-    init?(hotwords: [String], vocabulary: [String], blankToken: Int, config: NemotronASRHotwordsConfig) {
-        var keys = Set<String>()
+    init?(hotwords: [String], vocabulary: [String], blankToken: Int, alpha: Float) {
+        var keys = Set<Text>()
         for hotword in hotwords {
-            let words = hotword.lowercased().split(whereSeparator: { $0.isWhitespace })
-            if !words.isEmpty { keys.insert(" " + words.joined(separator: " ")) }
+            let words = Self.normalized(hotword).split(whereSeparator: { $0.isWhitespace })
+            if !words.isEmpty { keys.insert(Array((" " + words.joined(separator: " ")).unicodeScalars)) }
         }
         guard !keys.isEmpty else { return nil }
         self.keys = keys
-        self.config = config
-        self.blankToken = blankToken
-        var pieceIDs: [String: [Int]] = [:]
+        self.alpha = alpha
+        var pieceIDs: [Text: [Int]] = [:]
         var textPieces = Set<Int>()
+        var emittable = [Bool](repeating: false, count: vocabulary.count + 1)
         for (id, piece) in vocabulary.enumerated()
         where id != blankToken && !NemotronASRTokenizer.isSpecialToken(id, vocabulary: vocabulary) {
-            let text = piece.replacingOccurrences(of: "▁", with: " ").lowercased()
+            let text = Array(piece.replacingOccurrences(of: "▁", with: " ").lowercased().unicodeScalars)
             guard !text.isEmpty else { continue }
             pieceIDs[text, default: []].append(id)
-            if text.contains(where: { $0 != " " }) { textPieces.insert(id) }
+            emittable[id] = true
+            if text.contains(where: { $0 != Self.space }) { textPieces.insert(id) }
         }
         self.pieceIDs = pieceIDs
-        self.emittable = Set(pieceIDs.values.joined())
+        self.emittable = emittable
         self.textPieces = textPieces
         self.maxPieceLength = pieceIDs.keys.map(\.count).max() ?? 0
         // The start of a transcript is a word boundary: a piece with no leading "▁"
         // still starts a word there.
-        self.chain = [Match(text: " ", depth: 0, score: 0)]
+        self.chain = [Match(text: [Self.space], depth: 0, score: 0)]
     }
 
     private func arc(_ depth: Int) -> Float {
         let score = depth == 0
-            ? config.contextScore
-            : config.contextScore * config.depthScaling + Float(log(Double(depth + 1)))
-        return config.alpha * score
+            ? Self.contextScore
+            : Self.contextScore * Self.depthScaling + Float(log(Double(depth + 1)))
+        return alpha * score
     }
 
     /// Tokens whose text extends `text` to a phrase prefix, with that prefix.
-    private func extensions(_ text: String) -> [(token: Int, text: String)] {
+    private func extensions(_ text: Text) -> [(token: Int, text: Text)] {
         if let cached = extensionsCache[text] { return cached }
-        var found: [Int: String] = [:]
-        for key in keys where key.count > text.count && key.hasPrefix(text) {
-            let rest = key.dropFirst(text.count)
-            var end = rest.startIndex
-            for _ in 0..<min(rest.count, maxPieceLength) {
-                end = rest.index(after: end)
-                let piece = String(rest[rest.startIndex..<end])
+        var found: [Int: Text] = [:]
+        for key in keys where key.count > text.count && key.starts(with: text) {
+            let rest = key[text.count...]
+            for length in stride(from: 1, through: min(rest.count, maxPieceLength), by: 1) {
+                let piece = Text(rest.prefix(length))
                 for token in pieceIDs[piece] ?? [] where found[token] == nil {
                     found[token] = text + piece
                 }
@@ -118,7 +118,7 @@ final class NemotronASRHotwordBooster {
         return result
     }
 
-    private func step(_ match: Match, _ token: Int, _ text: String) -> Match {
+    private func step(_ match: Match, _ token: Int, _ text: Text) -> Match {
         guard textPieces.contains(token) else {
             return Match(text: text, depth: match.depth, score: match.score)
         }
@@ -145,16 +145,21 @@ final class NemotronASRHotwordBooster {
 
     /// The token to emit instead of `greedy`, the unbiased argmax of `logits`.
     func choose(logits: [Float], greedy: Int) -> Int {
-        guard greedy != blankToken else { return greedy }
+        guard greedy < emittable.count, emittable[greedy] else { return greedy }
         let (unmatched, tokens) = scores()
+        var biased = logits
+        for index in biased.indices {
+            biased[index] = index < emittable.count && emittable[index] ? logits[index] + unmatched : -.infinity
+        }
+        for (token, score) in tokens where token < biased.count {
+            biased[token] = logits[token] + score
+        }
+        // The first maximum, as numpy's argmax takes it.
         var best = greedy
         var bestScore = -Float.infinity
-        for (token, logit) in logits.enumerated() where token != blankToken {
-            let score = logit + (tokens[token] ?? unmatched)
-            if score > bestScore {
-                best = token
-                bestScore = score
-            }
+        for (index, value) in biased.enumerated() where value > bestScore {
+            best = index
+            bestScore = value
         }
         return best
     }
@@ -162,7 +167,7 @@ final class NemotronASRHotwordBooster {
     /// Advance the matches with an emitted token. Special tokens, such as a
     /// language tag, leave them as they are.
     func accept(_ token: Int) {
-        guard emittable.contains(token) else { return }
+        guard token < emittable.count, emittable[token] else { return }
         var next: [Match] = []
         for match in chain + [Self.root] {
             for (candidate, text) in extensions(match.text) where candidate == token {
