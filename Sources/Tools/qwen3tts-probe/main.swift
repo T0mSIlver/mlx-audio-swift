@@ -99,7 +99,7 @@ for c in cases {
 
 // Per-step profile (only when built with the bench-only timers).
 if CommandLine.arguments.contains("--profile") || ProcessInfo.processInfo.environment["Q3_PROFILE"] != nil {
-    for split in [false, true] {
+    for split in [false] {
         Qwen3TTSProfile.splitEval = split
         for _ in 0 ..< 2 {
             Qwen3TTSProfile.reset()
