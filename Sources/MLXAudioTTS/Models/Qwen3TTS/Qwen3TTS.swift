@@ -420,6 +420,7 @@ public final class Qwen3TTSModel: Module, SpeechGenerationModel, @unchecked Send
 
         for step in 0 ..< effectiveMaxTokens {
             try Task.checkCancellation()
+            let pT0 = DispatchTime.now().uptimeNanoseconds
             // Forward pass through talker
             let (logits, hidden) = talker(inputEmbeds, cache: cache)
 
@@ -438,6 +439,15 @@ public final class Qwen3TTSModel: Module, SpeechGenerationModel, @unchecked Send
 
             // Defer sync to the eval boundary with inputEmbeds.
             let isEOS = nextToken .== eosTokenArray
+            var pSplit: UInt64 = 0
+            if Qwen3TTSProfile.splitEval {
+                let a = DispatchTime.now().uptimeNanoseconds
+                eval(nextToken, hidden)
+                let b = DispatchTime.now().uptimeNanoseconds
+                Qwen3TTSProfile.talkerBuild += Double(a - pT0) / 1e9
+                Qwen3TTSProfile.talkerEval += Double(b - a) / 1e9
+                pSplit = b
+            }
 
             // Generate remaining codebook tokens with code predictor
             var codeTokens = [nextToken]
@@ -487,7 +497,13 @@ public final class Qwen3TTSModel: Module, SpeechGenerationModel, @unchecked Send
             }
 
             inputEmbeds = textEmbed + codecEmbed
+            let pT1 = DispatchTime.now().uptimeNanoseconds
             eval(inputEmbeds, isEOS)
+            let pT2 = DispatchTime.now().uptimeNanoseconds
+            Qwen3TTSProfile.build += Double(pT1 - (pSplit > 0 ? pSplit : pT0)) / 1e9
+            Qwen3TTSProfile.evalWait += Double(pT2 - pT1) / 1e9
+            Qwen3TTSProfile.steps += 1
+            defer { Qwen3TTSProfile.rest += Double(DispatchTime.now().uptimeNanoseconds - pT2) / 1e9 }
 
             let tokenId = Int(nextToken[0, 0].item(Int32.self))
             onToken?(tokenId)
@@ -1376,5 +1392,23 @@ public final class Qwen3TTSModel: Module, SpeechGenerationModel, @unchecked Send
 
         let jsonData = try JSONSerialization.data(withJSONObject: tokenizerJson, options: [.sortedKeys])
         try jsonData.write(to: outputPath)
+    }
+}
+
+
+/// Bench-only timers. Not part of the PR.
+public enum Qwen3TTSProfile {
+    nonisolated(unsafe) public static var splitEval = false
+    nonisolated(unsafe) public static var build = 0.0
+    nonisolated(unsafe) public static var evalWait = 0.0
+    nonisolated(unsafe) public static var rest = 0.0
+    nonisolated(unsafe) public static var talkerBuild = 0.0
+    nonisolated(unsafe) public static var talkerEval = 0.0
+    nonisolated(unsafe) public static var steps = 0
+    public static func reset() { build = 0; evalWait = 0; rest = 0; talkerBuild = 0; talkerEval = 0; steps = 0 }
+    public static func report(_ tag: String) -> String {
+        let n = Double(max(steps, 1))
+        return String(format: "PROFILE %@ steps=%d build_ms=%.2f eval_wait_ms=%.2f rest_ms=%.2f talker_build_ms=%.2f talker_eval_ms=%.2f",
+            tag, steps, build / n * 1e3, evalWait / n * 1e3, rest / n * 1e3, talkerBuild / n * 1e3, talkerEval / n * 1e3)
     }
 }
