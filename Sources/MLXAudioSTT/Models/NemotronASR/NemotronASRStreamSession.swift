@@ -194,7 +194,7 @@ public final class NemotronASRStreamSession {
         chunkFrames: Int?,
         bufferedContext: NemotronASRBufferedContext? = nil,
         hotwords: [String] = [],
-        hotwordsConfig: NemotronASRHotwordsConfig = .init()
+        hotwordsAlpha: Float = nemotronASRDefaultHotwordsAlpha
     ) {
         self.model = model
         self.language = language
@@ -205,7 +205,7 @@ public final class NemotronASRStreamSession {
             hotwords: hotwords,
             vocabulary: model.vocabulary,
             blankToken: model.blankTokenID,
-            config: hotwordsConfig
+            alpha: hotwordsAlpha
         )
         self.melBasis = NemotronASRAudio.MelBasis(config: model.preprocessConfig)
         self.frameSeconds = model.encoderFrameSeconds
@@ -414,7 +414,7 @@ public extension NemotronASRModel {
         language: String? = nil,
         chunkMs: Int? = nil,
         hotwords: [String] = [],
-        hotwordsConfig: NemotronASRHotwordsConfig = .init()
+        hotwordsAlpha: Float = nemotronASRDefaultHotwordsAlpha
     ) -> NemotronASRStreamSession {
         let chunkFrames: Int?
         if let chunkMs {
@@ -426,7 +426,7 @@ public extension NemotronASRModel {
         }
         return NemotronASRStreamSession(
             model: self, language: language, chunkFrames: chunkFrames,
-            hotwords: hotwords, hotwordsConfig: hotwordsConfig
+            hotwords: hotwords, hotwordsAlpha: hotwordsAlpha
         )
     }
 
@@ -437,12 +437,12 @@ public extension NemotronASRModel {
         language: String? = nil,
         bufferedContext: NemotronASRBufferedContext,
         hotwords: [String] = [],
-        hotwordsConfig: NemotronASRHotwordsConfig = .init()
+        hotwordsAlpha: Float = nemotronASRDefaultHotwordsAlpha
     ) -> NemotronASRStreamSession {
         precondition(isBuffered, "bufferedContext needs a buffered (Unified) checkpoint")
         return NemotronASRStreamSession(
             model: self, language: language, chunkFrames: nil, bufferedContext: bufferedContext,
-            hotwords: hotwords, hotwordsConfig: hotwordsConfig
+            hotwords: hotwords, hotwordsAlpha: hotwordsAlpha
         )
     }
 
