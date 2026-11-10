@@ -17,6 +17,9 @@ private func applyRotaryPosEmb(
 ) -> (MLXArray, MLXArray) {
     let cosE = expandedDimensions(cosVal, axis: 1)
     let sinE = expandedDimensions(sinVal, axis: 1)
+    if Qwen3TTSExperiment.rope != 0 {
+        return (compiledSplitRope(q, cosE, sinE), compiledSplitRope(k, cosE, sinE))
+    }
     let qEmbed = q * cosE + rotateHalf(q) * sinE
     let kEmbed = k * cosE + rotateHalf(k) * sinE
     return (qEmbed, kEmbed)

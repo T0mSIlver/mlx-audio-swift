@@ -20,6 +20,10 @@ let refWav = args.count > 6 ? args[5] : nil
 let refText = args.count > 6 ? args[6] : nil
 try FileManager.default.createDirectory(at: outDir, withIntermediateDirectories: true)
 
+let env = ProcessInfo.processInfo.environment
+Qwen3TTSExperiment.rope = Int(env["Q3_ROPE"] ?? "0") ?? 0
+Qwen3TTSExperiment.cpTable = env["Q3_CPTABLE"] == "1"
+print("EXP rope=\(Qwen3TTSExperiment.rope) cpTable=\(Qwen3TTSExperiment.cpTable) opsPerBuffer=\(env["MLX_MAX_OPS_PER_BUFFER"] ?? "-")")
 let model = try await Qwen3TTSModel.fromModelDirectory(modelDir)
 let sampleRate = Double(model.sampleRate)
 var refAudio: MaterializedArray? = nil

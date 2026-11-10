@@ -3,6 +3,30 @@ import Foundation
 @preconcurrency import MLXAudioCore
 import MLXNN
 
+/// Bench-only switches. Not part of the PR.
+public enum Qwen3TTSExperiment {
+    /// 0: original RoPE, 1: compiled split RoPE (exact), 2: MLXFast.RoPE in the code predictor.
+    nonisolated(unsafe) public static var rope = 0
+    /// Precompute the code predictor's cos/sin rows once.
+    nonisolated(unsafe) public static var cpTable = false
+}
+
+/// `x * cos + rotateHalf(x) * sin`, written per half so one compiled kernel
+/// computes each half. Same operations in the same order, so the result is
+/// identical.
+let compiledSplitRope: @Sendable (MLXArray, MLXArray, MLXArray) -> MLXArray = {
+    MLX.compile { x, cosVal, sinVal in
+        let half = x.dim(-1) / 2
+        let x1 = x[.ellipsis, ..<half]
+        let x2 = x[.ellipsis, half...]
+        let c1 = cosVal[.ellipsis, ..<half]
+        let c2 = cosVal[.ellipsis, half...]
+        let s1 = sinVal[.ellipsis, ..<half]
+        let s2 = sinVal[.ellipsis, half...]
+        return concatenated([x1 * c1 - x2 * s1, x2 * c2 + x1 * s2], axis: -1)
+    }
+}()
+
 // MARK: - Code Predictor Attention
 
 private let compiledCodePredictorSwiGLU: @Sendable (MLXArray, MLXArray) -> MLXArray = {
@@ -16,6 +40,7 @@ final class CodePredictorAttention: Module {
     let numKvHeads: Int
     let headDim: Int
     let scale: Float
+    let ropeBase: Float
 
     @ModuleInfo(key: "q_proj") var qProj: Linear
     @ModuleInfo(key: "k_proj") var kProj: Linear
@@ -25,6 +50,7 @@ final class CodePredictorAttention: Module {
     @ModuleInfo(key: "k_norm") var kNorm: RMSNorm
 
     init(config: Qwen3TTSTalkerCodePredictorConfig, layerIdx: Int) {
+        self.ropeBase = config.ropeTheta
         self.numHeads = config.numAttentionHeads
         self.numKvHeads = config.numKeyValueHeads
         self.headDim = config.headDim
@@ -60,8 +86,18 @@ final class CodePredictorAttention: Module {
         let (cosVal, sinVal) = positionEmbeddings
         let cosE = expandedDimensions(cosVal, axis: 1)
         let sinE = expandedDimensions(sinVal, axis: 1)
-        q = q * cosE + cpRotateHalf(q) * sinE
-        k = k * cosE + cpRotateHalf(k) * sinE
+        switch Qwen3TTSExperiment.rope {
+        case 1:
+            q = compiledSplitRope(q, cosE, sinE)
+            k = compiledSplitRope(k, cosE, sinE)
+        case 2:
+            let offset = cache?.offset ?? 0
+            q = MLXFast.RoPE(q, dimensions: headDim, traditional: false, base: ropeBase, scale: 1.0, offset: offset)
+            k = MLXFast.RoPE(k, dimensions: headDim, traditional: false, base: ropeBase, scale: 1.0, offset: offset)
+        default:
+            q = q * cosE + cpRotateHalf(q) * sinE
+            k = k * cosE + cpRotateHalf(k) * sinE
+        }
 
         if let cache {
             (k, v) = cache.update(keys: k, values: v)
@@ -171,7 +207,13 @@ final class CodePredictorModel: Module {
             posIds = broadcast(pos, to: [batch, seqLen])
         }
 
-        let posEmbeddings = rotaryEmb(inputsEmbeds, positionIds: posIds)
+        let posEmbeddings: (MLXArray, MLXArray)
+        if Qwen3TTSExperiment.cpTable, positionIds == nil, batch == 1,
+           offset + seqLen <= config.numCodeGroups {
+            posEmbeddings = ropeRows(offset ..< offset + seqLen, dtype: inputsEmbeds.dtype)
+        } else {
+            posEmbeddings = rotaryEmb(inputsEmbeds, positionIds: posIds)
+        }
 
         var causalMask = mask
         if causalMask == nil, seqLen > 1 {
@@ -183,6 +225,22 @@ final class CodePredictorModel: Module {
             x = layer(x, positionEmbeddings: posEmbeddings, mask: causalMask, cache: cache?[i])
         }
         return norm(x)
+    }
+
+    private var ropeTable: (dtype: DType, cos: MLXArray, sin: MLXArray)?
+
+    /// cos/sin rows for positions in `range`, sliced from a table computed once
+    /// for every position the code predictor uses.
+    private func ropeRows(_ range: Range<Int>, dtype: DType) -> (MLXArray, MLXArray) {
+        if ropeTable?.dtype != dtype {
+            let n = config.numCodeGroups
+            let positions = MLXArray(Int32(0) ..< Int32(n)).reshaped(1, n)
+            let (cosVal, sinVal) = rotaryEmb(MLXArray.zeros([1], dtype: dtype), positionIds: positions)
+            eval(cosVal, sinVal)
+            ropeTable = (dtype, cosVal, sinVal)
+        }
+        let table = ropeTable!
+        return (table.cos[0..., range, 0...], table.sin[0..., range, 0...])
     }
 
     func makeCache() -> [any KVCache] {
