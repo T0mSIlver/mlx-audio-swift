@@ -1,6 +1,7 @@
 import Foundation
 import MLX
 import MLXAudioCore
+import MLXNN
 
 // True incremental (online) streaming for Voxtral Realtime.
 //
@@ -114,6 +115,110 @@ final class VoxtralPhaseTimers {
     }
 }
 
+/// MEASUREMENT ONLY. With VOXTRAL_MICRO=1, times parts of the real model on a fixed
+/// input, 15 passes each after 3 warm-up passes, and prints the medians once.
+enum VoxtralMicroBench {
+    nonisolated(unsafe) static var ran = false
+
+    static func median(_ body: () -> Void) -> Double {
+        var times: [Double] = []
+        for pass in 0..<18 {
+            let start = DispatchTime.now().uptimeNanoseconds
+            body()
+            if pass >= 3 { times.append(Double(DispatchTime.now().uptimeNanoseconds - start) / 1e6) }
+        }
+        return times.sorted()[times.count / 2]
+    }
+
+    static func run(_ model: VoxtralRealtimeModel) {
+        guard ProcessInfo.processInfo.environment["VOXTRAL_MICRO"] == "1", !ran else { return }
+        ran = true
+        let decoder = model.decoder
+        let encoder = model.encoder
+        let decDim = decoder.config.dim
+        let encDim = encoder.config.dim
+        let x1 = (MLXArray.ones([1, decDim], dtype: .float16) * 0.01)
+        let x4 = (MLXArray.ones([4, encDim], dtype: .float16) * 0.01)
+        MLX.eval(x1, x4)
+
+        // The decoder's seven quantized matmuls per layer, with its norms and gate, no attention.
+        let decMatmul = median {
+            var h = x1
+            for layer in decoder.layers {
+                let a = layer.attention
+                let n = layer.attentionNorm(h)
+                let q = a.wq(n)
+                let kv = a.wk(n).sum() + a.wv(n).sum()
+                h = h + a.wo(q) + kv * 0
+                let f = layer.ffnNorm(h)
+                h = h + layer.feedForwardW2(silu(layer.feedForwardW1(f)) * layer.feedForwardW3(f))
+            }
+            MLX.eval(h)
+        }
+        // The whole decoder forward on one token with an empty cache.
+        let decForward = median {
+            let out = decoder(x1, startPos: 0, cache: nil)
+            MLX.eval(out.0)
+        }
+        // The same with a cache that already holds 1,000 tokens.
+        var cache: [VoxtralRealtimeDecoderKVCache?]? = nil
+        var position = 0
+        for _ in 0..<1000 {
+            let out = decoder(x1, startPos: position, cache: cache)
+            cache = out.1
+            position += 1
+            if position % 50 == 0 { MLX.eval(out.0) }
+        }
+        let decForwardLong = median {
+            let out = decoder(x1, startPos: position, cache: cache)
+            cache = out.1
+            position += 1
+            MLX.eval(out.0)
+        }
+        // The encoder's seven quantized matmuls per layer on 4 rows, with norms and gate.
+        let encMatmul = median {
+            var h = x4
+            for layer in encoder.transformerLayers {
+                let a = layer.attention
+                let n = layer.attentionNorm(h)
+                let q = a.wq(n)
+                let kv = a.wk(n).sum() + a.wv(n).sum()
+                h = h + a.wo(q) + kv * 0
+                let f = layer.ffnNorm(h)
+                h = h + layer.feedForwardW2(silu(layer.feedForwardW1(f)) * layer.feedForwardW3(f))
+            }
+            MLX.eval(h)
+        }
+        // The whole incremental encoder pass on 4 rows, cache empty, then holding 376 rows.
+        func encoderPass(prefill: Int) -> Double {
+            let caches = (0..<encoder.transformerLayers.count).map { _ in
+                VoxtralRealtimeEncoderStreamKVCache(capacity: encoder.config.slidingWindow)
+            }
+            var start = 0
+            for _ in 0..<(prefill / 4) {
+                let out = encoder.encodeIncremental(x4, startPos: start, caches: caches)
+                start += 4
+                MLX.eval(out)
+            }
+            return median {
+                let out = encoder.encodeIncremental(x4, startPos: start, caches: caches)
+                start += 4
+                var arrays = [out]
+                for c in caches { if let k = c.keys, let v = c.values { arrays.append(k); arrays.append(v) } }
+                MLX.eval(arrays)
+            }
+        }
+        let encEmpty = encoderPass(prefill: 0)
+        let encFilled = encoderPass(prefill: 376)
+        let line = String(
+            format: "VOXTRAL micro dec_matmul_ms=%.2f dec_forward_empty_ms=%.2f dec_forward_1000_ms=%.2f "
+                + "enc_matmul_ms=%.2f enc_forward_empty_ms=%.2f enc_forward_376_ms=%.2f",
+            decMatmul, decForward, decForwardLong, encMatmul, encEmpty, encFilled
+        )
+        FileHandle.standardError.write(Data((line + "\n").utf8))
+    }
+}
+
 public final class VoxtralRealtimeStreamSession {
     private let timers: VoxtralPhaseTimers? = VoxtralPhaseTimers.enabled ? VoxtralPhaseTimers() : nil
     /// Text + token ids decoded by a single `step` / `finish` call.
@@ -176,7 +281,10 @@ public final class VoxtralRealtimeStreamSession {
 
     // speechd ends a stream by stepping zeros, not with `finish()`, so the report
     // goes out when the session is released.
-    deinit { timers?.report() }
+    deinit {
+        timers?.report()
+        VoxtralMicroBench.run(model)
+    }
 
     /// Full transcript decoded so far. Reading it can cost time proportional to its
     /// length, so hosts that only need each step's new text should use `Delta.text`.
