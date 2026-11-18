@@ -80,6 +80,8 @@ final class VoxtralPhaseTimers {
     private var encoderByRows: [Int: (calls: Int, ms: Double)] = [:]
     var steps = 0
     var tokens = 0
+    /// The dtype each stage's activations had, as last seen.
+    var dtypes: [String: String] = [:]
 
     func time<T>(_ phase: String, _ body: () -> T) -> T {
         let start = DispatchTime.now().uptimeNanoseconds
@@ -107,6 +109,7 @@ final class VoxtralPhaseTimers {
             let seen = encoderByRows[rows]!
             line += String(format: "\nVOXTRAL enc rows=%d calls=%d mean_ms=%.2f", rows, seen.calls, seen.ms / Double(seen.calls))
         }
+        line += "\nVOXTRAL dtypes " + dtypes.keys.sorted().map { "\($0)=\(dtypes[$0]!)" }.joined(separator: " ")
         FileHandle.standardError.write(Data((line + "\n").utf8))
     }
 }
@@ -268,7 +271,10 @@ public final class VoxtralRealtimeStreamSession {
                     self.convRows = self.convRows == nil ? rows : MLX.concatenated([self.convRows!, rows], axis: 0)
                 }
             }
-            if self.timers != nil, let convRows = self.convRows { MLX.eval(convRows) }
+            if self.timers != nil, let convRows = self.convRows {
+                MLX.eval(convRows)
+                self.timers?.dtypes["conv_rows"] = "\(convRows.dtype)"
+            }
         }
         if let timers { timers.time("fe", frontEnd) } else { frontEnd() }
         let convRowCount = convRowsDropped + (convRows?.shape[0] ?? 0)
@@ -288,6 +294,9 @@ public final class VoxtralRealtimeStreamSession {
                     convRows, startIndex: self.convRowsDropped, upTo: convFreeze, state: &self.encState
                 )
                 let rows = self.model.encoder.downsampleAndProject(newEnc)   // multiple-of-ds ⇒ whole rows
+                self.timers?.dtypes["enc_out"] = "\(newEnc.dtype)"
+                self.timers?.dtypes["adapter_rows"] = "\(rows.dtype)"
+                if let keys = self.encState.caches.first?.keys { self.timers?.dtypes["enc_cache_keys"] = "\(keys.dtype)" }
                 self.adapterBuf = self.adapterBuf == nil ? rows : MLX.concatenated([self.adapterBuf!, rows], axis: 0)
             }
             self.trimRetainedTails()
@@ -412,15 +421,19 @@ public final class VoxtralRealtimeStreamSession {
                     startPos: self.decPos,
                     cache: self.decCache
                 )
-                if self.timers != nil { MLX.eval(next.0) }
+                if self.timers != nil {
+                    MLX.eval(next.0)
+                    self.timers?.dtypes["dec_input"] = "\(inputEmbed.dtype)"
+                    self.timers?.dtypes["dec_hidden"] = "\(next.0.dtype)"
+                }
                 return next
             }
             let next = timers?.time("dec_layers", layers) ?? layers()
             decCache = next.1
             let head = {
-                self.model.evalPrediction(
-                    self.model.decoder.logits(next.0[0]), temperature: self.temperature
-                )
+                let logits = self.model.decoder.logits(next.0[0])
+                self.timers?.dtypes["logits"] = "\(logits.dtype)"
+                return self.model.evalPrediction(logits, temperature: self.temperature)
             }
             pendingPrediction = timers?.time("dec_head", head) ?? head()
             decPos += 1
