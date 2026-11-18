@@ -115,6 +115,35 @@ final class VoxtralPhaseTimers {
     }
 }
 
+/// MEASUREMENT ONLY. VOXTRAL_PARAMS=float32 casts every float16 parameter (the
+/// quantization scales and biases, the conv and adapter weights) to float32 once, so
+/// MLX stops casting them on every call while the activations stay float32 as they are
+/// today. VOXTRAL_PARAMS=float16 casts every float32 parameter (linear biases, norm
+/// weights) to float16, so the activations stay float16.
+enum VoxtralParamDtype {
+    nonisolated(unsafe) static var applied = false
+
+    static func apply(_ model: VoxtralRealtimeModel) {
+        guard !applied else { return }
+        applied = true
+        let from: DType
+        let to: DType
+        switch ProcessInfo.processInfo.environment["VOXTRAL_PARAMS"] {
+        case "float32": (from, to) = (.float16, .float32)
+        case "float16": (from, to) = (.float32, .float16)
+        default: return
+        }
+        var cast = 0
+        model.apply(map: { array in
+            guard array.dtype == from else { return array }
+            cast += 1
+            return array.asType(to)
+        })
+        MLX.eval(model.parameters().flattened().map { $0.1 })
+        FileHandle.standardError.write(Data("VOXTRAL params cast \(cast) arrays \(from) -> \(to)\n".utf8))
+    }
+}
+
 /// MEASUREMENT ONLY. With VOXTRAL_MICRO=1, times parts of the real model on a fixed
 /// input, 15 passes each after 3 warm-up passes, and prints the medians once.
 enum VoxtralMicroBench {
@@ -273,6 +302,7 @@ public final class VoxtralRealtimeStreamSession {
         self.temperature = temperature
         self.maxTokens = maxTokens
         self.transcriptionDelayMs = transcriptionDelayMs
+        VoxtralParamDtype.apply(model)
         self.encState = VoxtralRealtimeStreamEncoderState(
             layers: model.encoder.transformerLayers.count,
             slidingWindow: model.config.encoderArgs.slidingWindow
