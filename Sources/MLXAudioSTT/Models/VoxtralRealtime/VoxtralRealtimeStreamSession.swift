@@ -71,7 +71,48 @@ extension VoxtralRealtimeAudioEncoder {
     }
 }
 
+/// MEASUREMENT ONLY (scratch branch, never merged). With VOXTRAL_PHASE_TIMERS=1 the
+/// session times each phase of a step and evaluates its output at the phase's own
+/// boundary, so a phase is charged its own graph. `finish()` prints the sums on stderr.
+final class VoxtralPhaseTimers {
+    static let enabled = ProcessInfo.processInfo.environment["VOXTRAL_PHASE_TIMERS"] == "1"
+    private var ms: [String: Double] = [:]
+    private var encoderByRows: [Int: (calls: Int, ms: Double)] = [:]
+    var steps = 0
+    var tokens = 0
+
+    func time<T>(_ phase: String, _ body: () -> T) -> T {
+        let start = DispatchTime.now().uptimeNanoseconds
+        let out = body()
+        ms[phase, default: 0] += Double(DispatchTime.now().uptimeNanoseconds - start) / 1e6
+        return out
+    }
+
+    func encoder<T>(rows: Int, _ body: () -> T) -> T {
+        let start = DispatchTime.now().uptimeNanoseconds
+        let out = body()
+        let elapsed = Double(DispatchTime.now().uptimeNanoseconds - start) / 1e6
+        ms["enc", default: 0] += elapsed
+        let seen = encoderByRows[rows] ?? (0, 0)
+        encoderByRows[rows] = (seen.calls + 1, seen.ms + elapsed)
+        return out
+    }
+
+    func report() {
+        var line = "VOXTRAL phases steps=\(steps) tokens=\(tokens)"
+        for phase in ["fe", "enc", "prefill", "dec_read", "dec_layers", "dec_head"] {
+            line += String(format: " %@_ms=%.1f", phase, ms[phase] ?? 0)
+        }
+        for rows in encoderByRows.keys.sorted() {
+            let seen = encoderByRows[rows]!
+            line += String(format: "\nVOXTRAL enc rows=%d calls=%d mean_ms=%.2f", rows, seen.calls, seen.ms / Double(seen.calls))
+        }
+        FileHandle.standardError.write(Data((line + "\n").utf8))
+    }
+}
+
 public final class VoxtralRealtimeStreamSession {
+    private let timers: VoxtralPhaseTimers? = VoxtralPhaseTimers.enabled ? VoxtralPhaseTimers() : nil
     /// Text + token ids decoded by a single `step` / `finish` call.
     public struct Delta {
         public let text: String
@@ -214,13 +255,18 @@ public final class VoxtralRealtimeStreamSession {
             flushed = true
         }
 
-        let newMel = melStream!.append(newSamples)
-        if newMel.shape[1] > 0 {
-            let rows = model.encoder.convStemStep(newMel, state: &convState)
-            if rows.shape[0] > 0 {
-                convRows = convRows == nil ? rows : MLX.concatenated([convRows!, rows], axis: 0)
+        timers?.steps += 1
+        let frontEnd = {
+            let newMel = self.melStream!.append(newSamples)
+            if newMel.shape[1] > 0 {
+                let rows = self.model.encoder.convStemStep(newMel, state: &self.convState)
+                if rows.shape[0] > 0 {
+                    self.convRows = self.convRows == nil ? rows : MLX.concatenated([self.convRows!, rows], axis: 0)
+                }
             }
+            if self.timers != nil, let convRows = self.convRows { MLX.eval(convRows) }
         }
+        if let timers { timers.time("fe", frontEnd) } else { frontEnd() }
         let convRowCount = convRowsDropped + (convRows?.shape[0] ?? 0)
 
         // Emit ceiling: the whole-token span covered by real samples minus the
@@ -231,15 +277,19 @@ public final class VoxtralRealtimeStreamSession {
         let emitLimit = final ? convRowCount / ds : max(0, realRegion - frozenGuardTokens)
         let convFreeze = min(convRowCount / ds, emitLimit) * ds
 
-        if convFreeze > encState.consumed, let convRows {
-            let newEnc = model.encoder.feedIncremental(
-                convRows, startIndex: convRowsDropped, upTo: convFreeze, state: &encState
-            )
-            let rows = model.encoder.downsampleAndProject(newEnc)   // multiple-of-ds ⇒ whole rows
-            adapterBuf = adapterBuf == nil ? rows : MLX.concatenated([adapterBuf!, rows], axis: 0)
+        let encoderRows = max(0, convFreeze - encState.consumed)
+        let encode = {
+            if convFreeze > self.encState.consumed, let convRows = self.convRows {
+                let newEnc = self.model.encoder.feedIncremental(
+                    convRows, startIndex: self.convRowsDropped, upTo: convFreeze, state: &self.encState
+                )
+                let rows = self.model.encoder.downsampleAndProject(newEnc)   // multiple-of-ds ⇒ whole rows
+                self.adapterBuf = self.adapterBuf == nil ? rows : MLX.concatenated([self.adapterBuf!, rows], axis: 0)
+            }
+            self.trimRetainedTails()
+            self.freezeEncoderState()
         }
-        trimRetainedTails()
-        freezeEncoderState()
+        if let timers { timers.encoder(rows: encoderRows, encode) } else { encode() }
 
         guard let adapter = adapterBuf else {
             // Every adapter row was decoded and trimmed. `finish()` still owes the
@@ -247,7 +297,7 @@ public final class VoxtralRealtimeStreamSession {
             if final { Memory.clearCache() }
             return Delta(text: "", tokenIds: [])
         }
-        prefillIfNeeded(adapter: adapter)
+        if let timers { timers.time("prefill") { self.prefillIfNeeded(adapter: adapter) } } else { prefillIfNeeded(adapter: adapter) }
         let delta = decode(
             adapter: adapter,
             upTo: min(emitLimit, adapterRowsDropped + adapter.shape[0])
@@ -261,6 +311,7 @@ public final class VoxtralRealtimeStreamSession {
         // after releasing the session.
         if final {
             Memory.clearCache()
+            timers?.report()
         }
         return delta
     }
@@ -332,7 +383,9 @@ public final class VoxtralRealtimeStreamSession {
         // EOS) so the streamed token stream is identical at temperature 0.
         while decPos < emitLimit {
             guard let prediction = pendingPrediction else { break }
-            let token = model.readToken(prediction, temperature: temperature)
+            let token = timers?.time("dec_read") { self.model.readToken(prediction, temperature: self.temperature) }
+                ?? model.readToken(prediction, temperature: temperature)
+            timers?.tokens += 1
             generated.append(token)
             // Only a trailing EOS is left out of the text, as in `generated`.
             if token != model.config.eosTokenId {
@@ -350,15 +403,23 @@ public final class VoxtralRealtimeStreamSession {
             let inputEmbed = decPos < adapterRowsDropped + adapter.shape[0]
                 ? adapter[decPos - adapterRowsDropped] + tokenEmbed
                 : tokenEmbed
-            let next = model.decoder(
-                inputEmbed.expandedDimensions(axis: 0),
-                startPos: decPos,
-                cache: decCache
-            )
+            let layers = {
+                let next = self.model.decoder(
+                    inputEmbed.expandedDimensions(axis: 0),
+                    startPos: self.decPos,
+                    cache: self.decCache
+                )
+                if self.timers != nil { MLX.eval(next.0) }
+                return next
+            }
+            let next = timers?.time("dec_layers", layers) ?? layers()
             decCache = next.1
-            pendingPrediction = model.evalPrediction(
-                model.decoder.logits(next.0[0]), temperature: temperature
-            )
+            let head = {
+                self.model.evalPrediction(
+                    self.model.decoder.logits(next.0[0]), temperature: self.temperature
+                )
+            }
+            pendingPrediction = timers?.time("dec_head", head) ?? head()
             decPos += 1
             // Same cadence as the offline `generate` loop.
             if generated.count % 256 == 0 {
