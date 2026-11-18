@@ -171,6 +171,10 @@ public final class VoxtralRealtimeStreamSession {
         )
     }
 
+    // speechd ends a stream by stepping zeros, not with `finish()`, so the report
+    // goes out when the session is released.
+    deinit { timers?.report() }
+
     /// Full transcript decoded so far. Reading it can cost time proportional to its
     /// length, so hosts that only need each step's new text should use `Delta.text`.
     public var text: String { transcript.text }
@@ -311,7 +315,6 @@ public final class VoxtralRealtimeStreamSession {
         // after releasing the session.
         if final {
             Memory.clearCache()
-            timers?.report()
         }
         return delta
     }
