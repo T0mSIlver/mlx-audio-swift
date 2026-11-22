@@ -16,33 +16,32 @@ import MLXAudioCore
 //     once complete and both convs are causal, so every produced row is final and
 //     matches the offline full encode at the same absolute index. The trailing
 //     partial token is guarded by `frozenGuardTokens`.
-//   * RoPE attention is relative-position invariant, so feeding conv frames in
-//     sliding-window-aligned blocks with the cache RESET at each boundary reproduces
-//     `encodeChunked` (>sw) exactly; a single un-reset block reproduces `encodeFull`
-//     (<=sw). See `feedIncremental`.
+//   * every conv frame attends to itself and the `slidingWindow - 1` frames before
+//     it, read from a per-layer cache that slides with the stream, so the encoder
+//     output does not depend on how the audio was cut into steps and matches
+//     `encodeFull` (<=sw) and `encodeChunked` (>sw). See `feedIncremental`.
 //   * `finish()` reproduces the offline tail zero-pad ⇒ final transcript == generate().
 
 /// Persistent incremental-encoder state carried across `step` calls.
 ///
-/// Copies share the caches, so feeding one copy leaves the other's `blockBase` and
-/// `consumed` out of sync with them. Keep a single owner.
+/// Copies share the caches, so feeding one copy leaves the other's `consumed` out of
+/// sync with them. Keep a single owner.
 struct VoxtralRealtimeStreamEncoderState {
     let caches: [VoxtralRealtimeEncoderStreamKVCache]
-    var blockBase = 0   // absolute conv-frame index where the current sw-block began
     var consumed = 0    // conv frames already fed to the transformer
 
     init(layers: Int, slidingWindow: Int) {
         caches = (0..<layers).map { _ in
-            VoxtralRealtimeEncoderStreamKVCache(capacity: slidingWindow)
+            VoxtralRealtimeEncoderStreamKVCache(slidingWindow: slidingWindow)
         }
     }
 }
 
 extension VoxtralRealtimeAudioEncoder {
-    /// Feed conv frames `[state.consumed, upTo)` through the transformer incrementally,
-    /// resetting the per-layer caches at each `slidingWindow` boundary so the result is
-    /// bit-identical to offline `encodeFull` (<=sw) / `encodeChunked` (>sw). Returns the
-    /// new transformer-normed frames (pre-downsample).
+    /// Feed conv frames `[state.consumed, upTo)` through the transformer incrementally.
+    /// The per-layer caches slide with the stream, so each frame sees the same
+    /// `slidingWindow` frames as in offline `encodeFull` (<=sw) / `encodeChunked` (>sw).
+    /// Returns the new transformer-normed frames (pre-downsample).
     func feedIncremental(
         _ convOut: MLXArray,
         startIndex: Int,
@@ -52,19 +51,12 @@ extension VoxtralRealtimeAudioEncoder {
         let sw = config.slidingWindow
         var pieces: [MLXArray] = []
         while state.consumed < upTo {
-            let blockEnd = state.blockBase + sw
-            let end = min(upTo, blockEnd)
+            // At most a window of frames per pass bounds the attention mask.
+            let end = min(upTo, state.consumed + sw)
             // `convOut` starts at absolute row `startIndex`.
             let block = convOut[(state.consumed - startIndex)..<(end - startIndex), 0...]
-            // Block-relative positions: RoPE is relative, so this matches the absolute
-            // positions offline uses within each independent sw-block.
-            let relStart = state.consumed - state.blockBase
-            pieces.append(encodeIncremental(block, startPos: relStart, caches: state.caches))
+            pieces.append(encodeIncremental(block, startPos: state.consumed, caches: state.caches))
             state.consumed = end
-            if state.consumed == blockEnd {
-                state.caches.forEach { $0.reset() }
-                state.blockBase = blockEnd
-            }
         }
         if pieces.isEmpty { return convOut[0..<0, 0...] }
         return pieces.count == 1 ? pieces[0] : MLX.concatenated(pieces, axis: 0)
