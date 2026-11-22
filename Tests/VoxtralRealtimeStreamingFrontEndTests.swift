@@ -348,6 +348,65 @@ struct VoxtralRealtimeStreamingFrontEndTests {
         #expect(session.tokens.count == offline.generationTokens)
     }
 
+    /// Every conv row attends to itself and the 63 rows before it, wherever the offline
+    /// chunks fall. The reference is one pass over the whole sequence under the banded
+    /// mask that rule defines.
+    @Test func encoderWindowSlidesAcrossChunkBoundaries() throws {
+        let fixtureDir = try Self.makeRandomFixture(encoderLayers: 1)
+        defer { try? FileManager.default.removeItem(at: fixtureDir) }
+
+        let model = try VoxtralRealtimeModel.fromDirectory(fixtureDir)
+        let encoder = model.encoder
+        let config = model.config.encoderArgs
+        let rows = 200
+        let convOut = withRandomState(MLXRandom.RandomState(seed: 11)) {
+            MLXRandom.normal([rows, config.dim])
+        }
+
+        let inputs = VoxtralRealtimeEncoderAttentionInputs.build(
+            positions: MLXArray(0..<rows).asType(.int32),
+            seqLen: rows,
+            hasCache: true,
+            cachedLen: 0,
+            cachedOffset: 0,
+            slidingWindow: rows,
+            headDim: config.headDim,
+            ropeTheta: config.ropeTheta,
+            dtype: convOut.dtype
+        )
+        // On this tree `build` trims to `slidingWindow` keys, so it is given all the rows
+        // and the band is applied on top: a row sees itself and the 63 rows before it.
+        let q = MLXArray(0..<rows).asType(.int32).expandedDimensions(axis: 1)
+        let k = MLXArray(0..<rows).asType(.int32).expandedDimensions(axis: 0)
+        let allowed = logicalAnd(k .<= q, k .>= (q - MLXArray(Int32(config.slidingWindow - 1))))
+        let banded = VoxtralRealtimeEncoderAttentionInputs(
+            ropeCos: inputs.ropeCos,
+            ropeSin: inputs.ropeSin,
+            ropeCosCast: inputs.ropeCosCast,
+            ropeSinCast: inputs.ropeSinCast,
+            mask: .array(MLX.where(allowed, MLXArray(0.0), MLXArray(-1e9)).asType(convOut.dtype))
+        )
+        var x = convOut
+        for layer in encoder.transformerLayers {
+            x = VoxtralRealtimeStreamingFrontEndTests.onePass(layer, x, banded)
+        }
+        let reference = encoder.downsampleAndProject(encoder.transformerNorm(x))
+
+        let chunked = encoder.encodeChunked(convOut)
+        #expect(chunked.shape == reference.shape)
+        #expect(Self.maxAbsDifference(chunked, reference) <= 1e-3)
+    }
+
+    /// One layer over the whole sequence with no cache trim: a stream cache as large as
+    /// the sequence holds every key.
+    private static func onePass(
+        _ layer: VoxtralRealtimeEncoderLayer,
+        _ x: MLXArray,
+        _ inputs: VoxtralRealtimeEncoderAttentionInputs
+    ) -> MLXArray {
+        layer(x, inputs: inputs, streamCache: VoxtralRealtimeEncoderStreamKVCache(capacity: x.shape[0]))
+    }
+
     /// With one real encoder transformer layer and enough audio that the conv rows
     /// cross the 64-frame sliding-window boundary twice, the incremental
     /// cache-reset path (`feedIncremental`) must reproduce `encodeChunked` exactly.
