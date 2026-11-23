@@ -1144,6 +1144,56 @@ struct Qwen3TTSTests {
         #expect(abs(unprimed - expected).max().item(Float.self) > 1e-3)
     }
 
+    @Test func decodeKeepsFramesWhoseFirstCodebookIdIsZero() async throws {
+        let fixture = try await makeTinyQwen3TTSModel(
+            ttsModelType: "voice_design", includeSpeechEncoder: false)
+        defer { cleanupTemporaryArtifactDirectory(fixture.tokenizerDirectory) }
+        let speechTokenizer = try #require(fixture.model.speechTokenizer)
+        for dtype in [DType.int32, .uint32] {
+            let codes = MLXArray([3, 1, 0, 5, 7, 2, 0, 0, 2, 4] as [Int32])
+                .asType(dtype).reshaped(1, 5, 2)
+
+            let (_, lengths) = speechTokenizer.decode(codes)
+
+            #expect(lengths.asArray(Int32.self) == [Int32(5 * speechTokenizer.decodeUpsampleRate)])
+        }
+    }
+
+    @Test func decodeExcludesNegativeRightPaddingAndDecodesItAsZero() async throws {
+        let fixture = try await makeTinyQwen3TTSModel(
+            ttsModelType: "voice_design", includeSpeechEncoder: false)
+        defer { cleanupTemporaryArtifactDirectory(fixture.tokenizerDirectory) }
+        let speechTokenizer = try #require(fixture.model.speechTokenizer)
+        let codebooks = speechTokenizer.decoder.parameters().flattened()
+            .filter { $0.0.hasSuffix("embedding_sum") }
+            .map { ($0.0, MLXRandom.normal($0.1.shape, key: MLXRandom.key(0))) }
+        speechTokenizer.decoder.update(parameters: ModuleParameters.unflattened(codebooks))
+        let padded = MLXArray([3, 1, 0, 2, -1, -1, -1, -1] as [Int32]).reshaped(1, 4, 2)
+        let zeroPadded = MLXArray([3, 1, 0, 2, 0, 0, 0, 0] as [Int32]).reshaped(1, 4, 2)
+
+        let (wav, lengths) = speechTokenizer.decode(padded)
+        let (zeroWav, _) = speechTokenizer.decode(zeroPadded)
+
+        #expect(lengths.asArray(Int32.self) == [Int32(2 * speechTokenizer.decodeUpsampleRate)])
+        #expect(wav.shape == zeroWav.shape)
+        #expect(abs(wav - zeroWav).max().item(Float.self) == 0)
+    }
+
+    @Test func decodeChunkKeepsFramesWhoseFirstCodebookIdIsZero() async throws {
+        let fixture = try await makeTinyQwen3TTSModel(
+            ttsModelType: "voice_design", includeSpeechEncoder: false)
+        defer { cleanupTemporaryArtifactDirectory(fixture.tokenizerDirectory) }
+        let speechTokenizer = try #require(fixture.model.speechTokenizer)
+        for dtype in [DType.int32, .uint32] {
+            let codes = MLXArray([3, 1, 0, 5, 7, 2, 0, 0] as [Int32])
+                .asType(dtype).reshaped(1, 4, 2)
+
+            let audio = fixture.model.decodeChunk(codes)
+
+            #expect(audio.dim(0) == 4 * speechTokenizer.decodeUpsampleRate)
+        }
+    }
+
     @Test func decoderTransformerAttendsWithinSlidingWindow() throws {
         MLXRandom.seed(0)
         let json = """
@@ -1172,6 +1222,23 @@ struct Qwen3TTSTests {
         // Chunked matmuls can use different TF32 kernels on M5 and later,
         // so allow their rounding differences from full-sequence execution.
         #expect(abs(concatenated(chunks, axis: 1) - reference).max().item(Float.self) < 5e-3)
+    }
+
+    @Test func speechEncoderTransformerUsesRotateHalfRoPE() throws {
+        let json = """
+            {"hidden_size": 16, "num_attention_heads": 2, "num_key_value_heads": 2, "num_hidden_layers": 1,
+             "intermediate_size": 32, "num_filters": 4, "codebook_dim": 8, "codebook_size": 16,
+             "num_quantizers": 2, "rope_theta": 10000}
+            """
+        let config = try JSONDecoder().decode(Qwen3TTSTokenizerEncoderConfig.self, from: Data(json.utf8))
+        let encoder = Qwen3TTSSpeechTokenizerEncoder(config: config, validNumQuantizers: 2)
+        let rope = try #require(encoder.encoderTransformer.transformer.layers[0].self_attn.rope)
+        let x = MLXRandom.normal([1, 2, 12, 8], key: MLXRandom.key(0))
+
+        // The checkpoint's q/k projections are in Hugging Face layout, which pairs dimension i
+        // with i + headDim / 2 (MLX traditional: false), not with i + 1.
+        let rotateHalf = RoPE(dimensions: 8, traditional: false, base: 10_000)(x)
+        #expect(abs(rope(x) - rotateHalf).max().item(Float.self) < 1e-5)
     }
 
     @Test func customVoicePromptSplitsSpeakerAndInstruction() {
@@ -1427,6 +1494,71 @@ struct SopranoTextCleaningTests {
         #expect(cleanTextForSoprano("100th") == "one hundredth")
         #expect(cleanTextForSoprano("10K") == "ten thousand")
         #expect(cleanTextForSoprano("25M") == "twenty five million")
+    }
+
+    @Test func dashesAndCurlyQuotesBecomeASCII() {
+        #expect(cleanTextForSoprano("Wait\u{2014}what?") == "wait - what?")
+        #expect(cleanTextForSoprano("I don\u{2019}t know.") == "i don't know.")
+        #expect(cleanTextForSoprano("It\u{2018}s pages 10\u{2013}20.") == "it's pages ten-twenty.")
+        #expect(cleanTextForSoprano("He said \u{201C}hi\u{201D}.") == "he said hi.")
+    }
+
+    @Test func accentedLettersKeepTheirBaseLetter() {
+        #expect(cleanTextForSoprano("We met at the caf\u{00E9} on the corner.") == "we met at the cafe on the corner.")
+        #expect(cleanTextForSoprano("A na\u{00EF}ve plan") == "a naive plan")
+        #expect(cleanTextForSoprano("Jos\u{00E9} ordered cr\u{00E8}me br\u{00FB}l\u{00E9}e.") == "jose ordered creme brulee.")
+    }
+
+    @Test func decimalNumbersReadWithPoint() {
+        #expect(cleanTextForSoprano("It is 3.14 approx.") == "it is three point fourteen approx.")
+        #expect(cleanTextForSoprano("I have 2.5 liters") == "i have two point five liters")
+        #expect(cleanTextForSoprano("version 2.0") == "version two point zero")
+        #expect(cleanTextForSoprano("It costs $3.50 today.") == "it costs three dollars, fifty cents today.")
+        #expect(cleanTextForSoprano("I have 5 cats") == "i have five cats")
+    }
+
+    @Test func comparisonOperatorsReadAsWholeOperators() {
+        #expect(cleanTextForSoprano("x <= 5") == "x less than or equal to five")
+        #expect(cleanTextForSoprano("y>=10.") == "y greater than or equal to ten.")
+        #expect(cleanTextForSoprano("a < b") == "a less than b")
+        #expect(cleanTextForSoprano("1 = 1") == "one equals one")
+    }
+
+    @Test func timesAreSpoken() {
+        #expect(cleanTextForSoprano("Meet at 3:30 tomorrow.") == "meet at three thirty tomorrow.")
+        #expect(cleanTextForSoprano("At 9:05 we eat.") == "at nine oh five we eat.")
+        #expect(cleanTextForSoprano("At 3:00 we eat.") == "at three o'clock we eat.")
+        #expect(cleanTextForSoprano("It is 14:00 now.") == "it is fourteen hundred now.")
+        #expect(cleanTextForSoprano("It took 1:05:09 total.") == "it took one oh five oh nine total.")
+    }
+
+    @Test func phoneNumbersAreReadDigitByDigit() {
+        #expect(
+            cleanTextForSoprano("Call 555-123-4567 now.")
+                == "call five five five, one two three, four five six seven now.")
+        #expect(
+            cleanTextForSoprano("Call (415) 555-0123 today.")
+                == "call four one five, five five five, zero one two three today.")
+        #expect(
+            cleanTextForSoprano("Fax 555.123.4567.") == "fax five five five, one two three, four five six seven.")
+        // Digits inside a longer number are not a phone number.
+        #expect(
+            cleanTextForSoprano("Order 12345 678 9012 shipped.")
+                == "order twelve thousand three hundred forty five six hundred seventy eight nine thousand twelve shipped.")
+    }
+
+    @Test func fractionalSecondsAreSpoken() {
+        let cases = [
+            "1:00:00.5": "one oh oh zero point five",
+            "1:05:00.5": "one oh five zero point five",
+            "00:00:00.5": "zero oh oh zero point five",
+            "1:05:01.5": "one oh five oh one point five",
+            "1:05:10.5": "one oh five ten point five",
+            "1:05:00": "one oh five",
+        ]
+        for (timestamp, expected) in cases {
+            #expect(cleanTextForSoprano("It took \(timestamp) total.") == "it took \(expected) total.")
+        }
     }
 }
 
@@ -2226,6 +2358,30 @@ struct BreezeTTSTests {
         #expect(!values[4])
     }
 
+    @Test func textAttentionUsesPerLayerRopeParameters() throws {
+        let config = try JSONDecoder().decode(BreezeTextEncoderConfig.self, from: Data("""
+        {
+          "hidden_size": 16,
+          "num_hidden_layers": 2,
+          "num_attention_heads": 2,
+          "num_key_value_heads": 1,
+          "head_dim": 8,
+          "layer_types": ["sliding_attention", "full_attention"],
+          "rope_parameters": {
+            "full_attention": {"factor": 8.0, "rope_theta": 1000000, "rope_type": "linear"},
+            "sliding_attention": {"rope_theta": 10000, "rope_type": "default"}
+          }
+        }
+        """.utf8))
+        let x = MLX.sin(MLXArray(0..<96).asType(.float32)).reshaped([1, 2, 6, 8])
+        let sliding = BreezeTTSTextAttention(config: config, layerIndex: 0).rope(x)
+        let full = BreezeTTSTextAttention(config: config, layerIndex: 1).rope(x)
+        let expectedSliding = RoPE(dimensions: 8, traditional: false, base: 10_000, scale: 1)(x)
+        let expectedFull = RoPE(dimensions: 8, traditional: false, base: 1_000_000, scale: 0.125)(x)
+        #expect(allClose(sliding, expectedSliding).item(Bool.self))
+        #expect(allClose(full, expectedFull).item(Bool.self))
+    }
+
     @Test func audioEmbeddingSumsAllCodebooks() {
         let embedding = BreezeAudioEmbedding(
             numCodebooks: 3,
@@ -2293,6 +2449,76 @@ struct BreezeTTSTests {
     }
 }
 
+
+@Suite("Orpheus decode")
+struct OrpheusDecodeTests {
+    @Test func windowedDecodeReturnsEachFrameOnce() {
+        let numFrames = 70
+        let frames = MLXArray((0..<numFrames).map { Int32($0) }).expandedDimensions(axis: 0)
+        let layers = [
+            frames,
+            MLXArray.zeros([1, numFrames * 2], dtype: .int32),
+            MLXArray.zeros([1, numFrames * 4], dtype: .int32),
+        ]
+
+        let audio = llamaDecodeWindowed(layers: layers, samplesPerFrame: 3) { window in
+            repeated(window[0], count: 3, axis: 1).expandedDimensions(axis: -1)
+        }
+
+        let expected = (0..<numFrames).flatMap { Array(repeating: Int32($0), count: 3) }
+        #expect(audio.asArray(Int32.self) == expected)
+    }
+
+    @Test func promptsWithoutAVoiceUseTaraUnlessCloning() {
+        #expect(orpheusVoicePrompts(["One.", "Two."], voice: nil, cloning: false) == ["tara: One.", "tara: Two."])
+        #expect(orpheusVoicePrompts(["One."], voice: "leo", cloning: false) == ["leo: One."])
+        #expect(orpheusVoicePrompts(["One."], voice: nil, cloning: true) == ["One."])
+    }
+
+    @Test func longTextSplitsAtSentenceEnds() {
+        let paragraph = (0..<40)
+            .map { "Sentence number \($0) walks on down the long road home." }
+            .joined(separator: " ")
+
+        let segments = orpheusSplitLongSegment(paragraph)
+
+        #expect(segments.count > 1)
+        #expect(segments.allSatisfy { $0.count <= orpheusSegmentMaxChars && $0.hasSuffix(".") })
+        #expect(segments.joined(separator: " ") == paragraph)
+    }
+
+    @Test func runOfShortSentencesIsSplitBySentenceCount() {
+        let dialogue = Array(repeating: "No. Why not? Because!", count: 9).joined(separator: " ")
+
+        let segments = orpheusSplitLongSegment(dialogue)
+
+        #expect(segments.map { $0.filter { ".!?".contains($0) }.count } == [8, 8, 8, 3])
+        #expect(segments.joined(separator: " ") == dialogue)
+    }
+
+    @Test func sentenceLongerThanASegmentIsSplitAtAComma() {
+        let sentence = Array(repeating: "the road went on over the hills", count: 15).joined(separator: ", ") + "."
+
+        let segments = orpheusSplitLongSegment(sentence)
+
+        #expect(segments.count > 1)
+        #expect(segments.allSatisfy { $0.count <= orpheusSegmentMaxChars })
+        #expect(segments.dropLast().allSatisfy { $0.hasSuffix(",") })
+        #expect(segments.joined(separator: " ") == sentence)
+    }
+
+    @Test(arguments: [
+        (Array(repeating: "word", count: 150).joined(separator: " "), " "),
+        (String(repeating: "a", count: 700), ""),
+    ])
+    func textWithoutSentenceEndsStillFitsTheSegmentSize(text: String, joiner: String) {
+        let segments = orpheusSplitLongSegment(text)
+
+        #expect(segments.count > 1)
+        #expect(segments.allSatisfy { $0.count <= orpheusSegmentMaxChars })
+        #expect(segments.joined(separator: joiner) == text)
+    }
+}
 
 // MARK: - Kokoro TTS Tests
 
@@ -2932,8 +3158,8 @@ struct IndexTTSTests {
             ),
             (
                 "What's this? It's $12,345.",
-                "What is this? It is twelve thousand three hundred forty five dollars",
-                "WHAT IS THIS? IT IS TWELVE THOUSAND THREE HUNDRED FORTY FIVE DOLLARS"
+                "What is this? It is twelve thousand three hundred forty five dollars.",
+                "WHAT IS THIS? IT IS TWELVE THOUSAND THREE HUNDRED FORTY FIVE DOLLARS."
             ),
             (
                 "call 1 2 3 now",
@@ -2971,6 +3197,28 @@ struct IndexTTSTests {
             let normalized = IndexTTSTextNormalizer.normalize(input)
             #expect(normalized == expectedNormalized)
             #expect(IndexTTSTextNormalizer.tokenizeByCJKChar(normalized) == expectedTokenized)
+        }
+    }
+
+    @Test func normalizerReadsDollarsAndCentsSeparately() {
+        let cases = [
+            ("It costs $2.50 today.", "It costs two dollars fifty cents today."),
+            ("Pay $1,299.99 now.", "Pay one thousand two hundred ninety nine dollars ninety nine cents now."),
+            ("It costs $0.99 each.", "It costs ninety nine cents each."),
+            ("It costs $3.5.", "It costs three dollars fifty cents."),
+            ("Only $1 left.", "Only one dollar left."),
+            ("It costs $5.", "It costs five dollars."),
+            ("I have $5 10 apples.", "I have five dollars ten apples."),
+            ("Prices: $5,$10,$20.", "Prices, five dollars,ten dollars,twenty dollars."),
+            ("Pay $5, or $10.", "Pay five dollars, or ten dollars."),
+            (
+                "Prices: $1,000,$2,500.25.",
+                "Prices, one thousand dollars,two thousand five hundred dollars twenty five cents."
+            ),
+        ]
+
+        for (input, expected) in cases {
+            #expect(IndexTTSTextNormalizer.normalize(input) == expected)
         }
     }
 

@@ -51,6 +51,7 @@ import Foundation
 import Testing
 import MLX
 import MLXNN
+import Tokenizers
 
 @testable import MLXAudioCore
 @testable import MLXAudioSTT
@@ -1708,6 +1709,77 @@ struct Qwen3ASRModuleSetupTests {
         #expect(merged == "Chinese,English")
     }
 
+    final class ScriptedQwen3ASRModel: Qwen3ASRModel {
+        var replies: [[Int]] = []
+        var pending: [Int] = []
+
+        override func callAsFunction(
+            inputIds: MLXArray,
+            inputEmbeddings: MLXArray? = nil,
+            inputFeatures: MLXArray? = nil,
+            featureAttentionMask: MLXArray? = nil,
+            cache: [KVCache]? = nil
+        ) -> MLXArray {
+            if inputEmbeddings != nil {
+                pending = inputIds.asArray(Int32.self).contains(15) ? [] : replies.removeFirst()
+            }
+            let token = pending.isEmpty ? 151_645 : pending.removeFirst()
+            return MLXArray((0...151_645).map { Float($0 == token ? 1 : 0) }).reshaped([1, 1, -1])
+        }
+    }
+
+    @Test func qwen3ASRStreamDetectsLanguagePerChunk() async throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent("qwen3-asr-tokenizer-\(UUID())")
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let pieces = ["<unk>", "language ", "None", "English", "hello"]
+        let specials = ["<|im_start|>", "<|im_end|>", "<|audio_start|>", "<|audio_end|>", "<|audio_pad|>", "<asr_text>"]
+        var vocabulary = Dictionary(uniqueKeysWithValues: pieces.enumerated().map { ($1, $0) })
+        var added: [[String: Any]] = []
+        for (index, token) in specials.enumerated() {
+            vocabulary[token] = 10 + index
+            added.append(["id": 10 + index, "content": token, "special": true])
+        }
+        try JSONSerialization.data(withJSONObject: [
+            "model": ["type": "BPE", "vocab": vocabulary, "merges": [], "unk_token": "<unk>"],
+            "added_tokens": added,
+        ]).write(to: directory.appendingPathComponent("tokenizer.json"))
+        try JSONSerialization.data(withJSONObject: ["tokenizer_class": "PreTrainedTokenizerFast", "unk_token": "<unk>"])
+            .write(to: directory.appendingPathComponent("tokenizer_config.json"))
+
+        let model = ScriptedQwen3ASRModel(Qwen3ASRConfig(
+            audioConfig: Qwen3AudioEncoderConfig(
+                encoderLayers: 1, encoderAttentionHeads: 4, encoderFfnDim: 512, dModel: 256, outputDim: 128
+            ),
+            textConfig: Qwen3TextConfig(
+                vocabSize: 16, hiddenSize: 128, intermediateSize: 256, numHiddenLayers: 1,
+                numAttentionHeads: 4, numKeyValueHeads: 2, headDim: 32, tieWordEmbeddings: true
+            ),
+            audioTokenId: 14,
+            audioStartTokenId: 12,
+            audioEndTokenId: 13,
+            supportLanguages: ["English"]
+        ))
+        model.tokenizer = try await AutoTokenizer.from(modelFolder: directory)
+        model.replies = [[1, 2, 15], [1, 3, 15, 4], [1, 3, 15, 4]]
+
+        let audio = MLXArray.zeros([48_000])
+        #expect(splitAudioIntoChunks(audio, sampleRate: 16_000, chunkDuration: 1).count == 3)
+        var streamed = ""
+        var result: STTOutput?
+        for try await event in model.generateStream(audio: audio, chunkDuration: 1) {
+            switch event {
+            case .token(let token): streamed += token
+            case .result(let output): result = output
+            default: break
+            }
+        }
+
+        #expect(streamed == "hello hello")
+        #expect(result?.text == "hello hello")
+        #expect(result?.language == "None,English")
+    }
+
     @Test func qwen3ForcedAlignerModelConstruction() {
         let config = Qwen3ASRConfig(
             audioConfig: Qwen3AudioEncoderConfig(
@@ -1992,6 +2064,22 @@ struct MossTranscribeDiarizeModuleSetupTests {
 }
 
 struct CohereTranscribeModuleSetupTests {
+
+    @Test func encoderRunsInTheWeightsDtypeWithFloat32Features() throws {
+        let json = """
+        {"d_model": 16, "ff_expansion_factor": 2, "n_heads": 2, "conv_kernel_size": 3, "n_layers": 1,
+         "pos_emb_max_len": 64, "subsampling_conv_channels": 4, "subsampling_factor": 8, "feat_in": 16}
+        """
+        let config = try JSONDecoder().decode(CohereTranscribeAudioEncoderConfig.self, from: Data(json.utf8))
+        let encoder = ConformerEncoder(config)
+        encoder.train(false)
+        let fp16 = encoder.parameters().flattened().map { ($0.0, $0.1.asType(.float16)) }
+        encoder.update(parameters: ModuleParameters.unflattened(fp16))
+
+        let features = MLXRandom.normal([1, config.featIn, 40])
+        let (out, _) = encoder(features)
+        #expect(out.dtype == .float16)
+    }
 
     @Test func cohereConfigDecoding() throws {
         let json = """

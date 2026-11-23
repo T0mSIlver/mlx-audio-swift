@@ -171,6 +171,47 @@ private func expandNumSuffix(_ match: String) -> String {
     return "\(digit) \(suffixes[suffix] ?? "")"
 }
 
+/// A phone number is read digit by digit in groups of three, three and four:
+/// "(415) 555-0123" -> "4 1 5, 5 5 5, 0 1 2 3".
+private func expandPhoneNumber(_ match: String) -> String {
+    let digits = Array(match.filter(\.isNumber))
+    guard digits.count == 10 else { return match }
+    let groups = [digits[0..<3], digits[3..<6], digits[6...]]
+    return groups.map { $0.map(String.init).joined(separator: " ") }.joined(separator: ", ")
+}
+
+/// Readings follow Soprano's reference normalizer ("3:30" -> "3 30", "9:05" -> "9 oh 5",
+/// "3:00" -> "3 o'clock"); the number step speaks the digits.
+private func expandTime(_ match: String) -> String {
+    let parts = match.split(separator: ":").map(String.init)
+    let hours = parts[0]
+    var minutes = parts[1]
+    if parts.count == 2 {
+        if minutes == "00" {
+            let hour = Int(hours) ?? 0
+            if hour == 0 { return "0" }
+            if hour > 12 { return "\(hours) hundred" }
+            return "\(hours) o'clock"
+        }
+        if minutes.hasPrefix("0") { minutes = "oh \(minutes.dropFirst())" }
+        return "\(hours) \(minutes)"
+    }
+    var seconds = parts[2]
+    if minutes == "00" {
+        minutes = "oh oh"
+    } else if minutes.hasPrefix("0") {
+        minutes = "oh \(minutes.dropFirst())"
+    }
+    let secondsParts = seconds.split(separator: ".", maxSplits: 1, omittingEmptySubsequences: false)
+    if secondsParts[0] == "00" {
+        // Keep the zero before a fraction for the decimal step.
+        seconds = secondsParts.count > 1 ? "0.\(secondsParts[1])" : ""
+    } else if seconds.hasPrefix("0") {
+        seconds = "oh \(seconds.dropFirst())"
+    }
+    return "\(hours) \(minutes) \(seconds)".trimmingCharacters(in: .whitespaces)
+}
+
 private func expandDollars(_ match: String) -> String {
     // Remove $ and commas
     let cleaned = match.replacingOccurrences(of: ",", with: "")
@@ -274,6 +315,32 @@ private func normalizeNumbers(_ text: String) -> String {
         }
     }
 
+    // Ten-digit phone numbers, not part of a longer number
+    if let regex = try? NSRegularExpression(
+        pattern: "(?<!\\d)\\(?\\d{3}\\)?[-.\\s]\\d{3}[-.\\s]?\\d{4}(?!\\d)", options: []
+    ) {
+        let range = NSRange(result.startIndex..., in: result)
+        let matches = regex.matches(in: result, range: range).reversed()
+        for match in matches {
+            if let matchRange = Range(match.range, in: result) {
+                let matchStr = String(result[matchRange])
+                result.replaceSubrange(matchRange, with: expandPhoneNumber(matchStr))
+            }
+        }
+    }
+
+    // Times, before ":" becomes "." in the special character step
+    if let regex = try? NSRegularExpression(pattern: "\\d\\d?:\\d\\d(?::\\d\\d(?:\\.\\d+)?)?", options: []) {
+        let range = NSRange(result.startIndex..., in: result)
+        let matches = regex.matches(in: result, range: range).reversed()
+        for match in matches {
+            if let matchRange = Range(match.range, in: result) {
+                let matchStr = String(result[matchRange])
+                result.replaceSubrange(matchRange, with: expandTime(matchStr))
+            }
+        }
+    }
+
     // Dollar amounts
     if let regex = try? NSRegularExpression(pattern: "\\$([\\d.,]*\\d+)", options: []) {
         let range = NSRange(result.startIndex..., in: result)
@@ -282,6 +349,18 @@ private func normalizeNumbers(_ text: String) -> String {
             if let matchRange = Range(match.range, in: result) {
                 let matchStr = String(result[matchRange]).dropFirst() // Remove $
                 result.replaceSubrange(matchRange, with: expandDollars(String(matchStr)))
+            }
+        }
+    }
+
+    // Decimal numbers: read the point, then each side as a number
+    if let regex = try? NSRegularExpression(pattern: "\\d+\\.\\d+", options: []) {
+        let range = NSRange(result.startIndex..., in: result)
+        let matches = regex.matches(in: result, range: range).reversed()
+        for match in matches {
+            if let matchRange = Range(match.range, in: result) {
+                let matchStr = String(result[matchRange])
+                result.replaceSubrange(matchRange, with: matchStr.replacingOccurrences(of: ".", with: " point "))
             }
         }
     }
@@ -324,6 +403,9 @@ private let specialCharacters: [(pattern: String, replacement: String)] = [
     ("\\+", " plus "),
     ("\\\\", " backslash "),
     ("~", " about "),
+    // Before "<", ">" and "=", which would read "<=" as "less than equals".
+    ("<=", " less than or equal to "),
+    (">=", " greater than or equal to "),
     ("<", " less than "),
     (">", " greater than "),
     ("=", " equals "),
@@ -344,9 +426,24 @@ private func expandSpecialCharacters(_ text: String) -> String {
 
 // MARK: - Text Cleaning
 
+// Punctuation with no ASCII form, which the filter below would drop: the words
+// around a dash would run together ("wait\u{2014}what" -> "waitwhat") and a curly
+// apostrophe would leave "dont". Soprano's reference normalizer turns the em dash
+// into " - " and maps the others with unidecode, as the Python port does.
+private let asciiPunctuation: [Character: String] = [
+    "\u{2014}": " - ",
+    "\u{2013}": "-",
+    "\u{2018}": "'",
+    "\u{2019}": "'",
+    "\u{201C}": "\"",
+    "\u{201D}": "\"",
+]
+
 private func convertToASCII(_ text: String) -> String {
-    // Normalize unicode and convert to ASCII
-    let normalized = text.precomposedStringWithCanonicalMapping
+    let punctuated = text.map { asciiPunctuation[$0] ?? String($0) }.joined()
+    // Decompose so an accented letter keeps its base letter once the combining
+    // mark is filtered out ("caf\u{00E9}" -> "cafe"), as the Python port's NFKD does.
+    let normalized = punctuated.decomposedStringWithCanonicalMapping
     return normalized.unicodeScalars
         .filter { $0.isASCII }
         .map { String($0) }

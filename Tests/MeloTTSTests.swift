@@ -23,12 +23,20 @@ struct MeloTTSTests {
         #expect(abs(a.reshaped(-1) - MLXArray(expected)).max().item(Float.self) < tolerance)
     }
     @Test func normalizationAndAlignment() throws {
-        #expect(MeloEnglishFrontend.normalize("Dr. Smith has 1,234.05 apples!") == "doctor smith has one thousand two hundred thirty four point  five apples!")
+        #expect(MeloEnglishFrontend.normalize("Dr. Smith has 1,234.05 apples!") == "doctor smith has one thousand two hundred thirty four point zero five apples!")
+        #expect(MeloEnglishFrontend.normalize("It costs 2.50 now.") == "it costs two point five zero now.")
         let durations = MLXArray([Float(2), 1, 3]).reshaped(1, 1, 3)
         let path = MeloTTSModel.path(durations, frames: 6)
         #expect(path.shape == [1, 3, 6])
         #expect(path.asArray(Float.self) == [1,1,0,0,0,0, 0,0,1,0,0,0, 0,0,0,1,1,1])
         #expect(TTS.resolveModelType(modelRepo: "mlx-community/MeloTTS-English-MLX") == "melotts")
+    }
+    @Test func normalizationReadsMillionsAndBillions() {
+        #expect(MeloEnglishFrontend.normalize("2,000,000 people") == "two million people")
+        #expect(MeloEnglishFrontend.normalize("1,500,000") == "one million five hundred thousand")
+        #expect(MeloEnglishFrontend.normalize("1000001") == "one million one")
+        #expect(MeloEnglishFrontend.normalize("3,000,000,000") == "three billion")
+        #expect(MeloEnglishFrontend.normalize("42,000") == "forty two thousand")
     }
     @Test func phoneStressWordpieceAndBlankAlignment() throws {
         let frontend = MeloEnglishFrontend(vocabulary: ["hello": 7592, "act": 2552, "##iv": 1001, "##ist": 1002, ".": 1012],
@@ -46,6 +54,14 @@ struct MeloTTSTests {
         let plain = try frontend.process("Hello.", symbols: symbols, addBlank: false)
         #expect(plain.phoneIDs == [0,1,2,3,4,11,0])
         #expect(plain.tones == [7,7,8,7,9,7,7])
+    }
+    @Test func normalizationReadsOrdinals() {
+        #expect(MeloEnglishFrontend.normalize("The 21st century.") == "the twenty first century.")
+        #expect(MeloEnglishFrontend.normalize("2nd place") == "second place")
+        #expect(MeloEnglishFrontend.normalize("the 12th") == "the twelfth")
+        #expect(MeloEnglishFrontend.normalize("the 40th") == "the fortieth")
+        #expect(MeloEnglishFrontend.normalize("the 100th") == "the one hundredth")
+        #expect(MeloEnglishFrontend.normalize("5 stars") == "five stars")
     }
     @Test func validatesConfigurationsOptionsAndRequiredTensors() throws {
         var c = tinyConfiguration(); try c.validate()

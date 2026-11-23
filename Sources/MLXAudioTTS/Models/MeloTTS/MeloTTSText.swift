@@ -141,7 +141,9 @@ struct MeloEnglishFrontend {
     static func number(_ n: Int) -> String {
         if n == 0 { return "zero" }
         if n < 0 { return "minus " + number(-n) }
-        if n >= 1000 { return number(n / 1000) + " thousand" + (n % 1000 == 0 ? "" : " " + number(n % 1000)) }
+        for (scale, name) in [(1_000_000_000_000, "trillion"), (1_000_000_000, "billion"), (1_000_000, "million"), (1000, "thousand")] where n >= scale {
+            return number(n / scale) + " " + name + (n % scale == 0 ? "" : " " + number(n % scale))
+        }
         if n >= 100 { return ones[n / 100] + " hundred" + (n % 100 == 0 ? "" : " " + number(n % 100)) }
         if n < 20 { return ones[n] }
         return ["", "", "twenty", "thirty", "forty", "fifty", "sixty", "seventy", "eighty", "ninety"][n / 10] + (n % 10 == 0 ? "" : " " + ones[n % 10])
@@ -154,6 +156,13 @@ struct MeloEnglishFrontend {
         }
         return result
     }
+    static let ordinalWords = ["one": "first", "two": "second", "three": "third", "five": "fifth", "eight": "eighth", "nine": "ninth", "twelve": "twelfth"]
+    static func ordinal(_ n: Int) -> String {
+        var words = number(n).split(separator: " ").map(String.init)
+        let last = words.removeLast()
+        words.append(ordinalWords[last] ?? (last.hasSuffix("y") ? last.dropLast() + "ieth" : last + "th"))
+        return words.joined(separator: " ")
+    }
     static func normalize(_ text: String) -> String {
         var text = text.lowercased()
         for (from, to) in ["mrs":"missis", "mr":"mister", "dr":"doctor", "st":"saint", "co":"company", "jr":"junior", "maj":"major", "gen":"general", "drs":"doctors", "rev":"reverend", "lt":"lieutenant", "hon":"honorable", "sgt":"sergeant", "capt":"captain", "esq":"esquire", "ltd":"limited", "col":"colonel", "ft":"fort"] {
@@ -163,8 +172,9 @@ struct MeloEnglishFrontend {
         text = replacing(text, pattern: #"\d+\.\d+"#) { value in
             let p = value.split(separator: ".")
             guard let n = Int(p[0]) else { return value }
-            return number(n) + " point " + p[1].map { ones[$0.wholeNumberValue ?? 0] }.joined(separator: " ")
+            return number(n) + " point " + p[1].map { number($0.wholeNumberValue ?? 0) }.joined(separator: " ")
         }
+        text = replacing(text, pattern: #"\d+(st|nd|rd|th)\b"#) { value in Int(value.dropLast(2)).map(ordinal) ?? value }
         return replacing(text, pattern: #"\d+"#) { Int($0).map(number) ?? $0 }
     }
 }

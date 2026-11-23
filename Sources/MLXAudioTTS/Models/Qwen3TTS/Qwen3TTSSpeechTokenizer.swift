@@ -847,7 +847,9 @@ final class Qwen3TTSSpeechTokenizerEncoder: Module {
             maxSeqLen: config.maxPositionEmbeddings,
             kvRepeat: config.numAttentionHeads / config.numKeyValueHeads,
             dimFeedforward: config.intermediateSize,
-            convLayout: true
+            convLayout: true,
+            // Hugging Face layout (rotate-half), unlike Kyutai's interleaved Mimi checkpoints.
+            ropeTraditional: false
         )
         let projectedTransformer = MLXAudioCodecs.ProjectedTransformer(
             cfg: transformerCfg,
@@ -1071,11 +1073,11 @@ final class Qwen3TTSSpeechTokenizer: Module {
 
     func decode(_ audioCodes: MLXArray) -> (MLXArray, MLXArray) {
         // audioCodes: [batch, time, num_quantizers]
-        let codes = audioCodes.transposed(0, 2, 1) // [batch, num_quantizers, time]
+        let codes = maximum(audioCodes, 0).transposed(0, 2, 1) // [batch, num_quantizers, time]
         let wav = decoder.chunkedDecode(codes).squeezed(axis: 1)
 
         // Calculate valid lengths
-        let audioLengths = (audioCodes[0..., 0..., 0] .> 0).sum(axis: 1).asType(.int32) * Int32(decodeUpsampleRate)
+        let audioLengths = (audioCodes[0..., 0..., 0] .>= 0).sum(axis: 1).asType(.int32) * Int32(decodeUpsampleRate)
         return (wav, audioLengths)
     }
 

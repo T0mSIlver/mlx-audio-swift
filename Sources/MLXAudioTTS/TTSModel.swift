@@ -71,10 +71,8 @@ public enum TTS {
         } else {
             do {
                 modelType = try await ModelUtils.resolveModelType(repoID: repoID, hfToken: hfToken, cache: cache)
-            } catch {
+            } catch let error as HTTPClientError where error.code == .responseError && error.statusCode == 404 {
                 // Some complete packages keep metadata beside their language model.
-                guard case let HTTPClientError.responseError(response, _) = error,
-                      response.statusCode == 404 else { throw error }
                 let client: HubClient
                 if let hfToken, !hfToken.isEmpty {
                     client = HubClient(host: HubClient.defaultHost, bearerToken: hfToken, cache: cache)
@@ -360,6 +358,13 @@ public enum TTS {
                 modelType: resolvedType,
                 pretrained: { try await SparkModel.fromPretrained($0, cache: $1) }
             )
+        case "stable_audio_3":
+            return try await load(
+                source,
+                modelType: resolvedType,
+                pretrained: { try await StableAudio3Model.fromPretrained($0, cache: $1) },
+                local: { modelDir, _ in try await StableAudio3Model.fromModelDirectory(modelDir) }
+            )
         case "tada", "tada_tts":
             return try await load(source, modelType: resolvedType,
                 pretrained: { try await TADAModel.fromPretrained($0, cache: $1, hfToken: hfToken) },
@@ -402,6 +407,12 @@ public enum TTS {
                 source, modelType: resolvedType,
                 pretrained: { try await Zonos2Model.fromPretrained($0, cache: $1) },
                 local: { folder, _ in try await Zonos2Model.fromModelDirectory(folder, cache: source.cache) }
+            )
+        case "zonos3", "zonos3_mini":
+            return try await load(
+                source, modelType: resolvedType,
+                pretrained: { try await Zonos3Model.fromPretrained($0, cache: $1, hfToken: hfToken) },
+                local: { folder, _ in try await Zonos3Model.fromModelDirectory(folder) }
             )
         default:
             throw TTSModelError.unsupportedModelType(resolvedType)
@@ -477,6 +488,7 @@ public enum TTS {
 
     private static func inferModelType(from modelRepo: String) -> String? {
         let lower = modelRepo.lowercased()
+        if lower.contains("zonos3") { return "zonos3" }
         if lower.contains("zonos2") { return "zonos2" }
         if lower.contains("ming-3.0-tts-tiny") { return "lingv3_tts" }
         if lower.contains("ming"), lower.contains("tts"), lower.contains("0.5b") {
@@ -499,6 +511,7 @@ public enum TTS {
         }
         // Repo names are hyphenated (e.g. "Irodori-TTS-600M-…"); match the bare name.
         if lower.contains("rumik") { return "rumik_oss" }
+        if lower.contains("stable-audio-3") { return "stable_audio_3" }
         if lower.contains("spark") {
             return "spark"
         }
